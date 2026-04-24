@@ -1,16 +1,22 @@
 # agent-plan
 
-`agent-plan` is a filesystem-backed replacement for the Python `agent-plan` CLI.
-It stores plan state in a workspace-local `.agent-plan/` directory so the same
-plan can work on local disk, an AFS mount, or any other filesystem that
-preserves `O_CREATE|O_EXCL` semantics for exclusive file creation.
+`agent-plan` is a filesystem-backed planning tool for agents and teams. It
+provides a CLI, an MCP stdio server, and an importable Go library for managing
+shared task state in a workspace-local `.agent-plan/` directory.
+
+It is designed for both single-agent and multi-agent workflows:
+
+- active tasks live in markdown files
+- claims are coordinated through exclusive file creation
+- a manifest provides fast listing and dashboard-friendly queries
+- completed work moves into history for auditability
 
 ## Install
 
 From the repo root:
 
 ```bash
-go install ./cmd/agent-plan
+make install
 ```
 
 That installs the binary into `$(go env GOBIN)` when `GOBIN` is set, or
@@ -26,12 +32,39 @@ agent-plan help
 To build a local binary from the repo root:
 
 ```bash
-go build -o agent-plan ./cmd/agent-plan
+make build
 ```
 
-A plain `go build` at the repo root does not leave an executable behind because
-the root package is the importable `agentplan` library, while the binary entry
-point lives under `./cmd/agent-plan`.
+That writes the native binary to `dist/agent-plan`.
+
+To build the common release targets:
+
+```bash
+make build-all
+```
+
+That produces binaries for:
+
+- `darwin/amd64`
+- `darwin/arm64`
+- `linux/amd64`
+- `linux/arm64`
+- `windows/amd64`
+- `windows/arm64`
+
+Other useful targets:
+
+```bash
+make test
+make clean
+```
+
+If you prefer the raw Go command, the binary entry point lives under
+`./cmd/agent-plan`, so the direct form is:
+
+```bash
+go build -o dist/agent-plan ./cmd/agent-plan
+```
 
 ## Layout
 
