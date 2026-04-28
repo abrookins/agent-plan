@@ -60,6 +60,7 @@ func runInit(_ string, stdout, stderr io.Writer, args []string) int {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dir := fs.String("dir", "", "workspace root")
+	jsonOut := fs.Bool("json", false, "emit json")
 	if err := fs.Parse(args); err != nil {
 		return 1
 	}
@@ -67,6 +68,12 @@ func runInit(_ string, stdout, stderr io.Writer, args []string) int {
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
+	}
+	if *jsonOut {
+		return writeJSON(stdout, map[string]string{
+			"root":     store.Root,
+			"meta_dir": store.MetaDir,
+		}, stderr)
 	}
 	fmt.Fprintf(stdout, "initialized %s\n", store.MetaDir)
 	return 0
@@ -305,13 +312,13 @@ func runPlanShow(program string, stdout, stderr io.Writer, args []string) int {
 
 func printUsage(w io.Writer, program string) {
 	fmt.Fprintf(w, `Usage:
-  %s init [--dir PATH]
-  %s add [--dir PATH] [--description TEXT] [--depends-on a,b] [--order N] <title>
+  %s init [--dir PATH] [--json]
+  %s add [--dir PATH] [--description TEXT] [--depends-on a,b] [--order N] [--json] <title>
   %s list [--dir PATH] [--status STATUS] [--json]
   %s next [--dir PATH] [--json]
-  %s claim [--dir PATH] [--by ACTOR] <id>
-  %s done [--dir PATH] [--by ACTOR] [--output TEXT] <id>
-  %s block [--dir PATH] [--by ACTOR] --reason TEXT <id>
+  %s claim [--dir PATH] [--by ACTOR] [--json] <id>
+  %s done [--dir PATH] [--by ACTOR] [--output TEXT] [--json] <id>
+  %s block [--dir PATH] [--by ACTOR] --reason TEXT [--json] <id>
   %s plan show [--dir PATH] [--json]
   %s mcp [--dir PATH]
 `, program, program, program, program, program, program, program, program, program)

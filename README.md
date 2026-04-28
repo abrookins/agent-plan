@@ -124,6 +124,10 @@ go run ./cmd/agent-plan mcp
 All commands accept `--dir <workspace-root>`. When omitted, `agent-plan`
 searches upward from the current working directory for `.agent-plan/`.
 
+Commands that return plan or task data also support `--json` for agent-facing
+consumption. The `mcp` command does not, because the MCP protocol defines its
+own wire format.
+
 ## MCP
 
 The stdio server exposes:

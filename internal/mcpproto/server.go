@@ -65,9 +65,25 @@ type Server struct {
 	Provider        Provider
 }
 
+type frameReader interface {
+	io.Reader
+	ReadString(delim byte) (string, error)
+}
+
+type frameWriter interface {
+	WriteString(string) (int, error)
+	Write([]byte) (int, error)
+	Flush() error
+}
+
+var (
+	newFrameReader = func(r io.Reader) frameReader { return bufio.NewReader(r) }
+	newFrameWriter = func(w io.Writer) frameWriter { return bufio.NewWriter(w) }
+)
+
 func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
-	reader := bufio.NewReader(r)
-	writer := bufio.NewWriter(w)
+	reader := newFrameReader(r)
+	writer := newFrameWriter(w)
 
 	for {
 		payload, err := ReadFrame(reader)
@@ -159,7 +175,7 @@ func (s *Server) HandleRequest(ctx context.Context, req Request) *Response {
 	return resp
 }
 
-func ReadFrame(r *bufio.Reader) ([]byte, error) {
+func ReadFrame(r frameReader) ([]byte, error) {
 	contentLength := -1
 	for {
 		line, err := r.ReadString('\n')
@@ -192,10 +208,6 @@ func ReadFrame(r *bufio.Reader) ([]byte, error) {
 		contentLength = length
 	}
 
-	if contentLength < 0 {
-		return nil, io.EOF
-	}
-
 	payload := make([]byte, contentLength)
 	if _, err := io.ReadFull(r, payload); err != nil {
 		return nil, err
@@ -203,7 +215,7 @@ func ReadFrame(r *bufio.Reader) ([]byte, error) {
 	return payload, nil
 }
 
-func WriteFrame(w *bufio.Writer, resp Response) error {
+func WriteFrame(w frameWriter, resp Response) error {
 	payload, err := json.Marshal(resp)
 	if err != nil {
 		return err

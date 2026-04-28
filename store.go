@@ -19,17 +19,47 @@ const (
 	historyDirName   = "history"
 	manifestFileName = "manifest.json"
 	manifestLockName = "manifest.lock"
-	lockWaitTimeout  = 5 * time.Second
-	lockPollInterval = 50 * time.Millisecond
 	defaultTaskPerm  = 0o644
 	defaultDirPerm   = 0o755
 )
 
 var (
+	lockWaitTimeout       = 5 * time.Second
+	lockPollInterval      = 50 * time.Millisecond
+	jsonMarshalIndent     = json.MarshalIndent
+	yamlMarshalFunc       = yaml.Marshal
+	yamlUnmarshalFunc     = yaml.Unmarshal
+	mkdirAllFunc          = os.MkdirAll
+	statFunc              = os.Stat
+	readFileFunc          = os.ReadFile
+	removeFileFunc        = os.Remove
+	renameFunc            = os.Rename
+	getwdFunc             = os.Getwd
+	absFunc               = filepath.Abs
+	openExclusiveFileFunc = func(path string, perm os.FileMode) (exclusiveFile, error) {
+		return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	}
+	createTempFileFunc = func(dir, pattern string) (tempFile, error) {
+		return os.CreateTemp(dir, pattern)
+	}
 	ErrPlanNotInitialized = errors.New("agent plan is not initialized in this workspace")
 	ErrTaskNotFound       = errors.New("task not found")
 	ErrTaskAlreadyClaimed = errors.New("task is already claimed")
 )
+
+type exclusiveFile interface {
+	Write([]byte) (int, error)
+	Sync() error
+	Close() error
+}
+
+type tempFile interface {
+	Name() string
+	Write([]byte) (int, error)
+	Chmod(os.FileMode) error
+	Sync() error
+	Close() error
+}
 
 type Store struct {
 	Root    string
@@ -46,14 +76,14 @@ func Init(root string) (*Store, error) {
 		Root:    resolvedRoot,
 		MetaDir: filepath.Join(resolvedRoot, metaDirName),
 	}
-	if err := os.MkdirAll(store.tasksDir(), defaultDirPerm); err != nil {
+	if err := mkdirAllFunc(store.tasksDir(), defaultDirPerm); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(store.historyDir(), defaultDirPerm); err != nil {
+	if err := mkdirAllFunc(store.historyDir(), defaultDirPerm); err != nil {
 		return nil, err
 	}
 
-	if _, err := os.Stat(store.manifestPath()); err == nil {
+	if _, err := statFunc(store.manifestPath()); err == nil {
 		return store, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return nil, err
@@ -82,7 +112,7 @@ func Open(root string) (*Store, error) {
 		Root:    resolvedRoot,
 		MetaDir: filepath.Join(resolvedRoot, metaDirName),
 	}
-	if _, err := os.Stat(store.manifestPath()); err != nil {
+	if _, err := statFunc(store.manifestPath()); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, ErrPlanNotInitialized
 		}
@@ -233,7 +263,7 @@ func (s *Store) Claim(id, by string) (*TaskRecord, error) {
 
 		record, err := s.readTaskRecord(summary.Path)
 		if err != nil {
-			_ = os.Remove(summary.ClaimPath)
+			_ = removeFileFunc(summary.ClaimPath)
 			return err
 		}
 		record.ClaimedBy = by
@@ -242,7 +272,7 @@ func (s *Store) Claim(id, by string) (*TaskRecord, error) {
 		record.Status = StatusInProgress
 		record.UpdatedAt = now
 		if err := s.writeTaskRecord(record.Path, record); err != nil {
-			_ = os.Remove(summary.ClaimPath)
+			_ = removeFileFunc(summary.ClaimPath)
 			return err
 		}
 
@@ -251,7 +281,7 @@ func (s *Store) Claim(id, by string) (*TaskRecord, error) {
 		manifest.UpdatedAt = now
 		sortSummaries(manifest.Tasks)
 		if err := s.writeManifest(manifest); err != nil {
-			_ = os.Remove(summary.ClaimPath)
+			_ = removeFileFunc(summary.ClaimPath)
 			return err
 		}
 		claimed = &record
@@ -315,11 +345,11 @@ func (s *Store) Done(id, output, by string) (*TaskRecord, error) {
 		if err := s.writeTaskRecord(historyPath, record); err != nil {
 			return err
 		}
-		if err := os.Remove(activePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeFileFunc(activePath); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 		if summary.ClaimPath != "" {
-			if err := os.Remove(summary.ClaimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := removeFileFunc(summary.ClaimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
 		}
@@ -385,7 +415,7 @@ func (s *Store) Block(id, reason, by string) (*TaskRecord, error) {
 			return err
 		}
 		if summary.ClaimPath != "" {
-			if err := os.Remove(summary.ClaimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := removeFileFunc(summary.ClaimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 				return err
 			}
 		}
@@ -510,7 +540,7 @@ func dependenciesReady(task TaskSummary, taskByID map[string]TaskSummary) bool {
 }
 
 func (s *Store) loadManifest() (Manifest, error) {
-	data, err := os.ReadFile(s.manifestPath())
+	data, err := readFileFunc(s.manifestPath())
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Manifest{}, ErrPlanNotInitialized
@@ -531,10 +561,10 @@ func (s *Store) loadManifest() (Manifest, error) {
 }
 
 func (s *Store) writeManifest(manifest Manifest) error {
-	if err := os.MkdirAll(s.MetaDir, defaultDirPerm); err != nil {
+	if err := mkdirAllFunc(s.MetaDir, defaultDirPerm); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(manifest, "", "  ")
+	data, err := jsonMarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -542,7 +572,7 @@ func (s *Store) writeManifest(manifest Manifest) error {
 }
 
 func (s *Store) readTaskRecord(path string) (TaskRecord, error) {
-	data, err := os.ReadFile(path)
+	data, err := readFileFunc(path)
 	if err != nil {
 		return TaskRecord{}, err
 	}
@@ -561,7 +591,7 @@ func (s *Store) readTaskRecord(path string) (TaskRecord, error) {
 }
 
 func (s *Store) writeTaskRecord(path string, record TaskRecord) error {
-	if err := os.MkdirAll(filepath.Dir(path), defaultDirPerm); err != nil {
+	if err := mkdirAllFunc(filepath.Dir(path), defaultDirPerm); err != nil {
 		return err
 	}
 	data, err := marshalTaskRecord(record)
@@ -581,7 +611,7 @@ func (s *Store) hydrateSummary(summary TaskSummary) (TaskSummary, error) {
 	}
 	if summary.Status != StatusComplete && summary.Status != StatusCancelled {
 		summary.ClaimPath = s.claimPath(summary.ID)
-		if data, err := os.ReadFile(summary.ClaimPath); err == nil {
+		if data, err := readFileFunc(summary.ClaimPath); err == nil {
 			var claim ClaimInfo
 			if err := json.Unmarshal(data, &claim); err == nil {
 				summary.ClaimedBy = claim.By
@@ -636,7 +666,7 @@ func parseTaskRecord(data []byte) (TaskRecord, error) {
 	body := rest[end+5:]
 
 	var record TaskRecord
-	if err := yaml.Unmarshal([]byte(frontmatter), &record); err != nil {
+	if err := yamlUnmarshalFunc([]byte(frontmatter), &record); err != nil {
 		return TaskRecord{}, err
 	}
 	record.Description = strings.TrimSpace(body)
@@ -647,7 +677,7 @@ func marshalTaskRecord(record TaskRecord) ([]byte, error) {
 	record.Path = ""
 	record.ClaimPath = ""
 	body := strings.TrimSpace(record.Description)
-	frontmatter, err := yaml.Marshal(record)
+	frontmatter, err := yamlMarshalFunc(record)
 	if err != nil {
 		return nil, err
 	}
@@ -664,7 +694,7 @@ func marshalTaskRecord(record TaskRecord) ([]byte, error) {
 }
 
 func (s *Store) withManifestLock(fn func() error) error {
-	if err := os.MkdirAll(s.MetaDir, defaultDirPerm); err != nil {
+	if err := mkdirAllFunc(s.MetaDir, defaultDirPerm); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(lockWaitTimeout)
@@ -676,7 +706,7 @@ func (s *Store) withManifestLock(fn func() error) error {
 	for {
 		err := s.writeExclusiveJSON(s.lockPath(), lockPayload)
 		if err == nil {
-			defer func() { _ = os.Remove(s.lockPath()) }()
+			defer func() { _ = removeFileFunc(s.lockPath()) }()
 			return fn()
 		}
 		if !errors.Is(err, os.ErrExist) {
@@ -698,10 +728,10 @@ func (s *Store) writeExclusiveJSON(path string, value any) error {
 }
 
 func writeExclusiveFile(path string, data []byte, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), defaultDirPerm); err != nil {
+	if err := mkdirAllFunc(filepath.Dir(path), defaultDirPerm); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	file, err := openExclusiveFileFunc(path, perm)
 	if err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return os.ErrExist
@@ -716,15 +746,15 @@ func writeExclusiveFile(path string, data []byte, perm os.FileMode) error {
 }
 
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), defaultDirPerm); err != nil {
+	if err := mkdirAllFunc(filepath.Dir(path), defaultDirPerm); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	tmp, err := createTempFileFunc(filepath.Dir(path), ".tmp-*")
 	if err != nil {
 		return err
 	}
 	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
+	defer removeFileFunc(tmpPath)
 
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
@@ -741,18 +771,18 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	return renameFunc(tmpPath, path)
 }
 
 func normalizeRoot(root string) (string, error) {
 	if strings.TrimSpace(root) == "" {
-		cwd, err := os.Getwd()
+		cwd, err := getwdFunc()
 		if err != nil {
 			return "", err
 		}
 		root = cwd
 	}
-	resolved, err := filepath.Abs(root)
+	resolved, err := absFunc(root)
 	if err != nil {
 		return "", err
 	}
@@ -769,7 +799,7 @@ func findWorkspaceRoot(root string) (string, error) {
 	}
 	current := start
 	for {
-		if _, err := os.Stat(filepath.Join(current, metaDirName)); err == nil {
+		if _, err := statFunc(filepath.Join(current, metaDirName)); err == nil {
 			return current, nil
 		}
 		parent := filepath.Dir(current)

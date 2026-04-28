@@ -149,6 +149,27 @@ func TestCLIJSONList(t *testing.T) {
 	}
 }
 
+func TestCLIInitJSON(t *testing.T) {
+	root := t.TempDir()
+
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+	code := runCLI(context.Background(), "agent-plan", []string{
+		"init", "--dir", root, "--json",
+	}, strings.NewReader(""), &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runCLI(init) code = %d stderr=%s", code, stderr.String())
+	}
+
+	var payload map[string]string
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if payload["root"] == "" || payload["meta_dir"] == "" {
+		t.Fatalf("payload = %#v", payload)
+	}
+}
+
 func TestMCPAddAndList(t *testing.T) {
 	root := t.TempDir()
 	server := NewMCPServer(root)
