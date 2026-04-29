@@ -8,7 +8,7 @@ It is designed for both single-agent and multi-agent workflows:
 
 - active tasks live in markdown files
 - claims are coordinated through exclusive file creation
-- a manifest provides fast listing and dashboard-friendly queries
+- a manifest provides fast listing and machine-friendly queries
 - completed work moves into history for auditability
 
 ## Install
@@ -79,7 +79,7 @@ go build -o dist/agent-plan ./cmd/agent-plan
     001-fix-auth.done
 ```
 
-- `manifest.json` is the query index for dashboards and fast task listing.
+- `manifest.json` is the query index for fast task listing and agent consumption.
 - `tasks/*.md` is the source of truth for active tasks.
 - `tasks/*.claim` is the task-claim coordination primitive.
 - `history/*.done` preserves completed task records for auditability.
@@ -153,6 +153,18 @@ Example client config:
   }
 }
 ```
+
+## Agent Skill
+
+The repo includes an agent skill at `.agents/skills/agent-plan/SKILL.md`.
+
+Use it when an agent should manage shared work in a workspace-local
+`.agent-plan/` directory and needs a compact workflow for:
+
+- inspecting current plan state
+- claiming the next task
+- adding, blocking, or completing work
+- preferring `--json` output for machine consumption
 
 ## AFS note
 

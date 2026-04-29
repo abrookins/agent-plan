@@ -2,3 +2,7 @@
 .agent-plan/
 /agent-plan
 /dist/
+!.agents/
+!.agents/skills/
+!.agents/skills/agent-plan/
+!.agents/skills/agent-plan/SKILL.md
