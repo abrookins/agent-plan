@@ -1,6 +1,7 @@
 package agentplan
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,17 +11,27 @@ import (
 	"strings"
 	"time"
 
+	"crypto/rand"
+
 	"gopkg.in/yaml.v3"
 )
 
 const (
-	metaDirName      = ".agent-plan"
-	tasksDirName     = "tasks"
-	historyDirName   = "history"
-	manifestFileName = "manifest.json"
-	manifestLockName = "manifest.lock"
-	defaultTaskPerm  = 0o644
-	defaultDirPerm   = 0o755
+	metaDirName        = ".agent-plan"
+	plansDirName       = "plans"
+	sessionsDirName    = "sessions"
+	workspaceFileName  = "workspace.json"
+	workspaceLockName  = "workspace.lock"
+	planFileName       = "plan.json"
+	tasksDirName       = "tasks"
+	historyDirName     = "history"
+	manifestFileName   = "manifest.json"
+	manifestLockName   = "manifest.lock"
+	defaultPlanPerm    = 0o644
+	defaultDirPerm     = 0o755
+	defaultPlanID      = "default"
+	defaultPlanName    = "Workspace Plan"
+	currentStoreFormat = 2
 )
 
 var (
@@ -33,7 +44,9 @@ var (
 	statFunc              = os.Stat
 	readFileFunc          = os.ReadFile
 	removeFileFunc        = os.Remove
+	removeAllFunc         = os.RemoveAll
 	renameFunc            = os.Rename
+	readDirFunc           = os.ReadDir
 	getwdFunc             = os.Getwd
 	absFunc               = filepath.Abs
 	openExclusiveFileFunc = func(path string, perm os.FileMode) (exclusiveFile, error) {
@@ -71,33 +84,19 @@ func Init(root string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	store := &Store{
 		Root:    resolvedRoot,
 		MetaDir: filepath.Join(resolvedRoot, metaDirName),
 	}
-	if err := mkdirAllFunc(store.tasksDir(), defaultDirPerm); err != nil {
+	if err := mkdirAllFunc(store.MetaDir, defaultDirPerm); err != nil {
 		return nil, err
 	}
-	if err := mkdirAllFunc(store.historyDir(), defaultDirPerm); err != nil {
-		return nil, err
-	}
-
-	if _, err := statFunc(store.manifestPath()); err == nil {
-		return store, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, err
-	}
-
-	now := time.Now().UTC()
-	manifest := Manifest{
-		Version:      1,
-		CreatedAt:    now,
-		UpdatedAt:    now,
-		NextSequence: 1,
-		Tasks:        []TaskSummary{},
-	}
-	if err := store.writeManifest(manifest); err != nil {
+	if err := store.withWorkspaceLock(func() error {
+		if err := store.migrateLegacyLocked(); err != nil {
+			return err
+		}
+		return store.ensureWorkspaceLocked()
+	}); err != nil {
 		return nil, err
 	}
 	return store, nil
@@ -112,10 +111,13 @@ func Open(root string) (*Store, error) {
 		Root:    resolvedRoot,
 		MetaDir: filepath.Join(resolvedRoot, metaDirName),
 	}
-	if _, err := statFunc(store.manifestPath()); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, ErrPlanNotInitialized
+	if err := store.withWorkspaceLock(func() error {
+		if err := store.migrateLegacyLocked(); err != nil {
+			return err
 		}
+		_, err := store.loadWorkspace()
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	return store, nil
@@ -132,57 +134,42 @@ func OpenOrInit(root string) (*Store, error) {
 	return Init(root)
 }
 
-func (s *Store) Add(title string, opts AddOptions) (*TaskRecord, error) {
-	if strings.TrimSpace(title) == "" {
-		return nil, fmt.Errorf("title is required")
+func (s *Store) CreatePlan(name, description, specPath string) (*Plan, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("plan name is required")
 	}
-
-	var created *TaskRecord
-	err := s.withManifestLock(func() error {
-		manifest, err := s.loadManifest()
+	var created *Plan
+	err := s.withWorkspaceLock(func() error {
+		if err := s.ensureWorkspaceLocked(); err != nil {
+			return err
+		}
+		planID, err := randomID()
 		if err != nil {
 			return err
 		}
 		now := time.Now().UTC()
-		sequence := manifest.NextSequence
-		slug := slugify(title)
-		id := fmt.Sprintf("%03d-%s", sequence, slug)
-
-		order := s.nextOrder(manifest)
-		if opts.Order != nil && *opts.Order >= 0 {
-			order = *opts.Order
-		}
-
-		record := &TaskRecord{
-			ID:          id,
-			Sequence:    sequence,
-			Slug:        slug,
-			Title:       strings.TrimSpace(title),
-			Status:      StatusNotStarted,
-			Order:       order,
-			DependsOn:   normalizeIDs(opts.DependsOn),
+		plan := &Plan{
+			ID:          planID,
+			Name:        name,
+			Description: description,
+			SpecPath:    strings.TrimSpace(specPath),
 			CreatedAt:   now,
 			UpdatedAt:   now,
-			Description: strings.TrimSpace(opts.Description),
-			Path:        s.taskPath(id),
-			ClaimPath:   s.claimPath(id),
+			Version:     1,
 		}
-		if err := s.validateDependencies(manifest, record.DependsOn); err != nil {
+		manifest := &Manifest{
+			Version:      1,
+			PlanID:       plan.ID,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+			NextSequence: 1,
+			Tasks:        []TaskSummary{},
+		}
+		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
 			return err
 		}
-		if err := s.writeTaskRecord(record.Path, *record); err != nil {
-			return err
-		}
-
-		summary := summaryFromRecord(*record)
-		manifest.Tasks = append(manifest.Tasks, summary)
-		manifest.NextSequence = sequence + 1
-		manifest.UpdatedAt = now
-		sortSummaries(manifest.Tasks)
-		if err := s.writeManifest(manifest); err != nil {
-			return err
-		}
-		created = record
+		created = plan
 		return nil
 	})
 	if err != nil {
@@ -191,100 +178,270 @@ func (s *Store) Add(title string, opts AddOptions) (*TaskRecord, error) {
 	return created, nil
 }
 
-func (s *Store) List(opts ListOptions) ([]TaskSummary, error) {
-	manifest, err := s.loadManifest()
-	if err != nil {
+func (s *Store) ListPlans() ([]PlanSummary, error) {
+	if _, err := s.loadWorkspace(); err != nil {
 		return nil, err
 	}
-	tasks := make([]TaskSummary, 0, len(manifest.Tasks))
-	for _, task := range manifest.Tasks {
-		hydrated, err := s.hydrateSummary(task)
+	entries, err := readDirFunc(s.plansDir())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	summaries := make([]PlanSummary, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		planRecord, err := s.loadPlanRecord(entry.Name())
 		if err != nil {
 			return nil, err
 		}
-		if opts.Status != nil && hydrated.Status != *opts.Status {
-			continue
+		manifest, err := s.loadManifest(entry.Name())
+		if err != nil {
+			return nil, err
 		}
-		tasks = append(tasks, hydrated)
+		complete := 0
+		for _, task := range manifest.Tasks {
+			if task.Status == StatusComplete {
+				complete++
+			}
+		}
+		summaries = append(summaries, PlanSummary{
+			ID:            planRecord.ID,
+			Name:          planRecord.Name,
+			Description:   planRecord.Description,
+			SpecPath:      planRecord.SpecPath,
+			SessionIDs:    append([]string(nil), planRecord.SessionIDs...),
+			TaskCount:     len(manifest.Tasks),
+			CompleteCount: complete,
+			UpdatedAt:     planRecord.UpdatedAt,
+		})
 	}
-	sortSummaries(tasks)
-	return tasks, nil
+	sort.SliceStable(summaries, func(i, j int) bool {
+		return summaries[i].UpdatedAt.After(summaries[j].UpdatedAt)
+	})
+	return summaries, nil
 }
 
-func (s *Store) Next() (*TaskSummary, error) {
-	manifest, err := s.loadManifest()
+func (s *Store) GetPlan(planID string) (*Plan, error) {
+	plan, _, err := s.loadPlan(planID)
+	return plan, err
+}
+
+func (s *Store) UpdatePlan(planID string, opts PlanUpdateOptions) (*Plan, error) {
+	var updated *Plan
+	err := s.withPlanLock(planID, func() error {
+		plan, manifest, err := s.loadPlan(planID)
+		if err != nil {
+			return err
+		}
+		plan.ApplyPlanUpdate(opts)
+		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
+			return err
+		}
+		updated = plan
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	return s.nextFromManifest(manifest)
+	return updated, nil
 }
 
-func (s *Store) Claim(id, by string) (*TaskRecord, error) {
-	by = strings.TrimSpace(by)
-	if by == "" {
-		by = defaultActor()
-	}
-
-	var claimed *TaskRecord
-	err := s.withManifestLock(func() error {
-		manifest, err := s.loadManifest()
+func (s *Store) DeletePlan(planID string) (bool, error) {
+	removed := false
+	err := s.withWorkspaceLock(func() error {
+		workspace, err := s.loadWorkspace()
 		if err != nil {
 			return err
 		}
-		index := findSummaryIndex(manifest.Tasks, id)
-		if index < 0 {
-			return ErrTaskNotFound
-		}
-
-		summary, err := s.hydrateSummary(manifest.Tasks[index])
-		if err != nil {
-			return err
-		}
-		if summary.Status == StatusComplete || summary.Status == StatusCancelled {
-			return fmt.Errorf("task %s is not claimable from status %s", id, summary.Status)
-		}
-		if summary.ClaimedBy != "" {
-			return ErrTaskAlreadyClaimed
-		}
-
-		now := time.Now().UTC()
-		claim := ClaimInfo{
-			By:        by,
-			ClaimedAt: now,
-			Host:      os.Getenv("HOSTNAME"),
-			PID:       os.Getpid(),
-		}
-		if err := s.writeExclusiveJSON(summary.ClaimPath, claim); err != nil {
-			if errors.Is(err, os.ErrExist) {
-				return ErrTaskAlreadyClaimed
+		if _, err := statFunc(s.planDir(planID)); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
 			}
 			return err
 		}
+		if err := removeAllFunc(s.planDir(planID)); err != nil {
+			return err
+		}
+		if workspace.DefaultPlanID == planID {
+			workspace.DefaultPlanID = defaultPlanID
+			workspace.UpdatedAt = time.Now().UTC()
+			if err := s.saveWorkspace(workspace); err != nil {
+				return err
+			}
+			if _, err := statFunc(s.planDir(defaultPlanID)); errors.Is(err, os.ErrNotExist) {
+				if err := s.createDefaultPlanLocked(defaultPlanID, defaultPlanName); err != nil {
+					return err
+				}
+			}
+		}
+		if err := s.removeBindingsForPlan(planID); err != nil {
+			return err
+		}
+		removed = true
+		return nil
+	})
+	if err != nil {
+		return false, err
+	}
+	return removed, nil
+}
 
-		record, err := s.readTaskRecord(summary.Path)
+func (s *Store) AddTask(planID, name string, opts AddOptions) (*TaskRecord, error) {
+	var created *TaskRecord
+	err := s.withPlanLock(planID, func() error {
+		plan, manifest, err := s.loadPlan(planID)
 		if err != nil {
-			_ = removeFileFunc(summary.ClaimPath)
 			return err
 		}
-		record.ClaimedBy = by
-		record.ClaimedAt = &now
-		record.Assignee = by
-		record.Status = StatusInProgress
-		record.UpdatedAt = now
-		if err := s.writeTaskRecord(record.Path, record); err != nil {
-			_ = removeFileFunc(summary.ClaimPath)
+		record, err := plan.AddTask(name, opts.Description, opts.ParentID, opts.Order, manifest.NextSequence)
+		if err != nil {
 			return err
 		}
+		deps, err := plan.ValidateDependencyIDs(opts.DependsOn, record.ID)
+		if err != nil {
+			return err
+		}
+		task := plan.GetTask(record.ID)
+		task.DependsOn = deps
+		task.UpdatedAt = time.Now().UTC()
+		manifest.NextSequence++
+		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
+			return err
+		}
+		task = plan.GetTask(record.ID)
+		if task == nil {
+			return ErrTaskNotFound
+		}
+		copy := *task
+		created = &copy
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
+}
 
-		updated := summaryFromRecord(record)
-		manifest.Tasks[index] = updated
-		manifest.UpdatedAt = now
-		sortSummaries(manifest.Tasks)
-		if err := s.writeManifest(manifest); err != nil {
-			_ = removeFileFunc(summary.ClaimPath)
+func (s *Store) UpdateTask(planID, taskID string, opts TaskUpdateOptions) (*TaskRecord, error) {
+	var updated *TaskRecord
+	err := s.withPlanLock(planID, func() error {
+		plan, manifest, err := s.loadPlan(planID)
+		if err != nil {
 			return err
 		}
-		claimed = &record
+		task, err := plan.ApplyTaskUpdate(taskID, opts)
+		if err != nil {
+			return err
+		}
+		if task.Status != StatusComplete {
+			task.ArchivedAt = nil
+		}
+		if task.Status == StatusComplete || task.Status == StatusCancelled || task.Status == StatusBlocked {
+			task.ClaimedBy = ""
+			task.ClaimedAt = nil
+		}
+		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
+			return err
+		}
+		task = plan.GetTask(taskID)
+		if task == nil {
+			return ErrTaskNotFound
+		}
+		copy := *task
+		updated = &copy
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
+func (s *Store) DeleteTask(planID, taskID string) (int, error) {
+	removed := 0
+	err := s.withPlanLock(planID, func() error {
+		plan, manifest, err := s.loadPlan(planID)
+		if err != nil {
+			return err
+		}
+		removed = plan.DeleteTask(taskID)
+		if removed == 0 {
+			return nil
+		}
+		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return removed, nil
+}
+
+func (s *Store) Ready(planID string) ([]TaskRecord, error) {
+	plan, _, err := s.loadPlan(planID)
+	if err != nil {
+		return nil, err
+	}
+	return plan.ReadyTasks(), nil
+}
+
+func (s *Store) NextTask(planID, sessionID string) (*TaskRecord, error) {
+	plan, _, err := s.loadPlan(planID)
+	if err != nil {
+		return nil, err
+	}
+	return plan.SelectNextTask(strings.TrimSpace(sessionID)), nil
+}
+
+func (s *Store) ClaimTask(planID, taskID, by string) (*TaskRecord, error) {
+	return s.claimTask(planID, taskID, by, "")
+}
+
+func (s *Store) ClaimNext(planID, sessionID string) (*TaskRecord, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	var claimed *TaskRecord
+	err := s.withPlanLock(planID, func() error {
+		plan, manifest, err := s.loadPlan(planID)
+		if err != nil {
+			return err
+		}
+		task := plan.SelectNextTask(sessionID)
+		if task == nil {
+			return nil
+		}
+		current := plan.GetTask(task.ID)
+		if current == nil {
+			return ErrTaskNotFound
+		}
+		if sessionID != "" {
+			current.AssignedSessionID = sessionID
+		}
+		by := sessionID
+		if by == "" {
+			by = defaultActor()
+		}
+		claimPath := s.claimPath(planID, current.ID)
+		claim, err := createClaim(claimPath, by)
+		if err != nil {
+			return err
+		}
+		now := claim.ClaimedAt.UTC()
+		current.Assignee = by
+		current.ClaimedBy = by
+		current.ClaimedAt = &now
+		current.Status = StatusInProgress
+		current.UpdatedAt = now
+		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
+			return err
+		}
+		copy := *current
+		claimed = &copy
 		return nil
 	})
 	if err != nil {
@@ -293,75 +450,162 @@ func (s *Store) Claim(id, by string) (*TaskRecord, error) {
 	return claimed, nil
 }
 
-func (s *Store) Done(id, output, by string) (*TaskRecord, error) {
-	output = strings.TrimSpace(output)
-	by = strings.TrimSpace(by)
-
-	var completed *TaskRecord
-	err := s.withManifestLock(func() error {
-		manifest, err := s.loadManifest()
+func (s *Store) BindSession(planID, sessionID string) (*SessionBinding, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return nil, fmt.Errorf("session id is required")
+	}
+	var binding *SessionBinding
+	err := s.withWorkspaceLock(func() error {
+		plan, manifest, err := s.loadPlan(planID)
 		if err != nil {
 			return err
 		}
-		index := findSummaryIndex(manifest.Tasks, id)
-		if index < 0 {
-			return ErrTaskNotFound
-		}
-
-		summary, err := s.hydrateSummary(manifest.Tasks[index])
-		if err != nil {
-			return err
-		}
-		record, err := s.readTaskRecord(summary.Path)
-		if err != nil {
-			return err
-		}
-
-		if summary.ClaimedBy != "" && by != "" && summary.ClaimedBy != by {
-			return fmt.Errorf("task %s is claimed by %s", id, summary.ClaimedBy)
-		}
-		now := time.Now().UTC()
-		if by == "" {
-			if summary.ClaimedBy != "" {
-				by = summary.ClaimedBy
-			} else {
-				by = defaultActor()
-			}
-		}
-
-		record.Assignee = by
-		record.ClaimedBy = ""
-		record.ClaimedAt = nil
-		record.Status = StatusComplete
-		record.Output = output
-		record.CompletedAt = &now
-		record.ArchivedAt = &now
-		record.UpdatedAt = now
-		activePath := record.Path
-		historyPath := s.historyPath(id)
-		record.Path = historyPath
-		record.ClaimPath = ""
-
-		if err := s.writeTaskRecord(historyPath, record); err != nil {
-			return err
-		}
-		if err := removeFileFunc(activePath); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if summary.ClaimPath != "" {
-			if err := removeFileFunc(summary.ClaimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if !containsID(plan.SessionIDs, sessionID) {
+			plan.SessionIDs = append(plan.SessionIDs, sessionID)
+			plan.touch()
+			if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
 				return err
 			}
 		}
-
-		updated := summaryFromRecord(record)
-		manifest.Tasks[index] = updated
-		manifest.UpdatedAt = now
-		sortSummaries(manifest.Tasks)
-		if err := s.writeManifest(manifest); err != nil {
+		if err := s.removeSessionFromOtherPlans(plan.ID, sessionID); err != nil {
 			return err
 		}
-		completed = &record
+		currentTask := firstAssignedTask(plan, sessionID)
+		payload := &SessionBinding{
+			SessionID: sessionID,
+			PlanID:    plan.ID,
+			PlanName:  plan.Name,
+			UpdatedAt: time.Now().UTC(),
+		}
+		if currentTask != nil {
+			payload.CurrentTaskID = currentTask.ID
+			payload.CurrentTaskName = currentTask.Name
+			payload.ClaimedAt = currentTask.ClaimedAt
+		}
+		if err := s.saveSessionBinding(payload); err != nil {
+			return err
+		}
+		binding = payload
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return binding, nil
+}
+
+func (s *Store) BindCurrent(planID string) (*SessionBinding, error) {
+	sessionID := resolveCurrentSessionID()
+	if sessionID == "" {
+		return nil, fmt.Errorf("no current session env was found")
+	}
+	return s.BindSession(planID, sessionID)
+}
+
+func (s *Store) GetSessionBinding(sessionID string) (*SessionBinding, error) {
+	data, err := readFileFunc(s.sessionBindingPath(sessionID))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var binding SessionBinding
+	if err := json.Unmarshal(data, &binding); err != nil {
+		return nil, err
+	}
+	return &binding, nil
+}
+
+func (s *Store) Add(title string, opts AddOptions) (*TaskRecord, error) {
+	workspace, err := s.loadWorkspace()
+	if err != nil {
+		return nil, err
+	}
+	return s.AddTask(workspace.DefaultPlanID, title, opts)
+}
+
+func (s *Store) List(opts ListOptions) ([]TaskSummary, error) {
+	workspace, err := s.loadWorkspace()
+	if err != nil {
+		return nil, err
+	}
+	plan, _, err := s.loadPlan(workspace.DefaultPlanID)
+	if err != nil {
+		return nil, err
+	}
+	summaries := make([]TaskSummary, 0, len(plan.Tasks))
+	for _, task := range plan.IterTasksInDisplayOrder() {
+		if opts.Status != nil && task.Status != *opts.Status {
+			continue
+		}
+		summaries = append(summaries, summaryFromRecord(task))
+	}
+	return summaries, nil
+}
+
+func (s *Store) Next() (*TaskSummary, error) {
+	workspace, err := s.loadWorkspace()
+	if err != nil {
+		return nil, err
+	}
+	task, err := s.NextTask(workspace.DefaultPlanID, "")
+	if err != nil || task == nil {
+		return nil, err
+	}
+	summary := summaryFromRecord(*task)
+	return &summary, nil
+}
+
+func (s *Store) Claim(id, by string) (*TaskRecord, error) {
+	workspace, err := s.loadWorkspace()
+	if err != nil {
+		return nil, err
+	}
+	return s.ClaimTask(workspace.DefaultPlanID, id, by)
+}
+
+func (s *Store) Done(id, output, by string) (*TaskRecord, error) {
+	workspace, err := s.loadWorkspace()
+	if err != nil {
+		return nil, err
+	}
+	var completed *TaskRecord
+	err = s.withPlanLock(workspace.DefaultPlanID, func() error {
+		plan, manifest, err := s.loadPlan(workspace.DefaultPlanID)
+		if err != nil {
+			return err
+		}
+		task := plan.GetTask(id)
+		if task == nil {
+			return ErrTaskNotFound
+		}
+		if task.ClaimedBy != "" && strings.TrimSpace(by) != "" && task.ClaimedBy != strings.TrimSpace(by) {
+			return fmt.Errorf("task %s is claimed by %s", id, task.ClaimedBy)
+		}
+		actor := strings.TrimSpace(by)
+		if actor == "" {
+			if task.ClaimedBy != "" {
+				actor = task.ClaimedBy
+			} else {
+				actor = defaultActor()
+			}
+		}
+		now := time.Now().UTC()
+		task.Assignee = actor
+		task.ClaimedBy = ""
+		task.ClaimedAt = nil
+		task.Status = StatusComplete
+		task.Output = strings.TrimSpace(output)
+		task.CompletedAt = &now
+		task.ArchivedAt = &now
+		task.UpdatedAt = now
+		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
+			return err
+		}
+		copy := *task
+		completed = &copy
 		return nil
 	})
 	if err != nil {
@@ -375,58 +619,40 @@ func (s *Store) Block(id, reason, by string) (*TaskRecord, error) {
 	if reason == "" {
 		return nil, fmt.Errorf("reason is required")
 	}
-	by = strings.TrimSpace(by)
-
+	workspace, err := s.loadWorkspace()
+	if err != nil {
+		return nil, err
+	}
 	var blocked *TaskRecord
-	err := s.withManifestLock(func() error {
-		manifest, err := s.loadManifest()
+	err = s.withPlanLock(workspace.DefaultPlanID, func() error {
+		plan, manifest, err := s.loadPlan(workspace.DefaultPlanID)
 		if err != nil {
 			return err
 		}
-		index := findSummaryIndex(manifest.Tasks, id)
-		if index < 0 {
+		task := plan.GetTask(id)
+		if task == nil {
 			return ErrTaskNotFound
 		}
-		summary, err := s.hydrateSummary(manifest.Tasks[index])
-		if err != nil {
+		if task.ClaimedBy != "" && strings.TrimSpace(by) != "" && task.ClaimedBy != strings.TrimSpace(by) {
+			return fmt.Errorf("task %s is claimed by %s", id, task.ClaimedBy)
+		}
+		actor := strings.TrimSpace(by)
+		if actor == "" {
+			actor = task.ClaimedBy
+		}
+		if actor != "" {
+			task.Assignee = actor
+		}
+		task.Status = StatusBlocked
+		task.BlockedReason = reason
+		task.ClaimedBy = ""
+		task.ClaimedAt = nil
+		task.UpdatedAt = time.Now().UTC()
+		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
 			return err
 		}
-		record, err := s.readTaskRecord(summary.Path)
-		if err != nil {
-			return err
-		}
-
-		if summary.ClaimedBy != "" && by != "" && summary.ClaimedBy != by {
-			return fmt.Errorf("task %s is claimed by %s", id, summary.ClaimedBy)
-		}
-		now := time.Now().UTC()
-		if by == "" && summary.ClaimedBy != "" {
-			by = summary.ClaimedBy
-		}
-		if by != "" {
-			record.Assignee = by
-		}
-		record.Status = StatusBlocked
-		record.BlockedReason = reason
-		record.ClaimedBy = ""
-		record.ClaimedAt = nil
-		record.UpdatedAt = now
-		if err := s.writeTaskRecord(record.Path, record); err != nil {
-			return err
-		}
-		if summary.ClaimPath != "" {
-			if err := removeFileFunc(summary.ClaimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-		}
-		updated := summaryFromRecord(record)
-		manifest.Tasks[index] = updated
-		manifest.UpdatedAt = now
-		sortSummaries(manifest.Tasks)
-		if err := s.writeManifest(manifest); err != nil {
-			return err
-		}
-		blocked = &record
+		copy := *task
+		blocked = &copy
 		return nil
 	})
 	if err != nil {
@@ -436,111 +662,279 @@ func (s *Store) Block(id, reason, by string) (*TaskRecord, error) {
 }
 
 func (s *Store) Overview() (*Overview, error) {
-	manifest, err := s.loadManifest()
+	workspace, err := s.loadWorkspace()
 	if err != nil {
 		return nil, err
 	}
-	tasks := make([]TaskSummary, 0, len(manifest.Tasks))
-	counts := map[string]int{}
-	for _, task := range manifest.Tasks {
-		hydrated, err := s.hydrateSummary(task)
-		if err != nil {
-			return nil, err
-		}
-		tasks = append(tasks, hydrated)
-		counts[string(hydrated.Status)]++
+	plan, _, err := s.loadPlan(workspace.DefaultPlanID)
+	if err != nil {
+		return nil, err
 	}
-	manifest.Tasks = tasks
-	sortSummaries(manifest.Tasks)
-	next, err := s.nextFromManifest(manifest)
+	counts := map[string]int{}
+	for _, task := range plan.Tasks {
+		counts[string(task.Status)]++
+	}
+	next, err := s.Next()
 	if err != nil {
 		return nil, err
 	}
 	return &Overview{
-		Manifest: manifest,
-		Counts:   counts,
-		Next:     next,
+		Plan:   plan,
+		Counts: counts,
+		Next:   next,
 	}, nil
 }
 
-func (s *Store) manifestPath() string { return filepath.Join(s.MetaDir, manifestFileName) }
-func (s *Store) lockPath() string     { return filepath.Join(s.MetaDir, manifestLockName) }
-func (s *Store) tasksDir() string     { return filepath.Join(s.MetaDir, tasksDirName) }
-func (s *Store) historyDir() string   { return filepath.Join(s.MetaDir, historyDirName) }
-func (s *Store) taskPath(id string) string {
-	return filepath.Join(s.tasksDir(), id+".md")
-}
-func (s *Store) claimPath(id string) string {
-	return filepath.Join(s.tasksDir(), id+".claim")
-}
-func (s *Store) historyPath(id string) string {
-	return filepath.Join(s.historyDir(), id+".done")
-}
-
-func (s *Store) nextOrder(manifest Manifest) int {
-	maxOrder := -1
-	for _, task := range manifest.Tasks {
-		if task.Order > maxOrder {
-			maxOrder = task.Order
-		}
+func (s *Store) claimTask(planID, taskID, by, assignedSessionID string) (*TaskRecord, error) {
+	by = strings.TrimSpace(by)
+	if by == "" {
+		by = defaultActor()
 	}
-	return maxOrder + 1
-}
-
-func (s *Store) nextFromManifest(manifest Manifest) (*TaskSummary, error) {
-	tasks := make([]TaskSummary, 0, len(manifest.Tasks))
-	for _, task := range manifest.Tasks {
-		hydrated, err := s.hydrateSummary(task)
+	var claimed *TaskRecord
+	err := s.withPlanLock(planID, func() error {
+		plan, manifest, err := s.loadPlan(planID)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		tasks = append(tasks, hydrated)
-	}
-	sortSummaries(tasks)
-	taskByID := map[string]TaskSummary{}
-	for _, task := range tasks {
-		taskByID[task.ID] = task
-	}
-	for _, task := range tasks {
-		if task.Status == StatusBlocked || task.Status == StatusComplete || task.Status == StatusCancelled {
-			continue
+		task := plan.GetTask(taskID)
+		if task == nil {
+			return ErrTaskNotFound
+		}
+		if task.Status == StatusComplete || task.Status == StatusCancelled {
+			return fmt.Errorf("task %s is not claimable from status %s", taskID, task.Status)
 		}
 		if task.ClaimedBy != "" {
-			continue
+			return ErrTaskAlreadyClaimed
 		}
-		if dependenciesReady(task, taskByID) {
-			candidate := task
-			return &candidate, nil
+		claim, err := createClaim(s.claimPath(planID, task.ID), by)
+		if err != nil {
+			return err
 		}
+		now := claim.ClaimedAt.UTC()
+		task.Assignee = by
+		task.ClaimedBy = by
+		task.ClaimedAt = &now
+		task.Status = StatusInProgress
+		task.UpdatedAt = now
+		if assignedSessionID != "" {
+			task.AssignedSessionID = assignedSessionID
+		}
+		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
+			return err
+		}
+		copy := *task
+		claimed = &copy
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	return nil, nil
+	return claimed, nil
 }
 
-func (s *Store) validateDependencies(manifest Manifest, ids []string) error {
-	taskByID := map[string]TaskSummary{}
-	for _, task := range manifest.Tasks {
-		taskByID[task.ID] = task
-	}
-	for _, id := range ids {
-		if _, ok := taskByID[id]; !ok {
-			return fmt.Errorf("dependency task not found: %s", id)
+func (s *Store) persistPlanLocked(plan *Plan, manifest *Manifest, _ map[string]TaskSummary) error {
+	if manifest == nil {
+		manifest = &Manifest{
+			Version:      1,
+			PlanID:       plan.ID,
+			CreatedAt:    plan.CreatedAt,
+			UpdatedAt:    plan.UpdatedAt,
+			NextSequence: 1,
 		}
+	}
+	if manifest.Version == 0 {
+		manifest.Version = 1
+	}
+	if manifest.PlanID == "" {
+		manifest.PlanID = plan.ID
+	}
+	if manifest.CreatedAt.IsZero() {
+		manifest.CreatedAt = plan.CreatedAt
+	}
+
+	previousFiles := map[string]TaskSummary{}
+	for _, task := range manifest.Tasks {
+		previousFiles[task.ID] = task
+	}
+
+	record := PlanRecord{
+		ID:          plan.ID,
+		Name:        plan.Name,
+		Description: plan.Description,
+		SpecPath:    strings.TrimSpace(plan.SpecPath),
+		SessionIDs:  normalizeIDs(plan.SessionIDs),
+		CreatedAt:   plan.CreatedAt.UTC(),
+		UpdatedAt:   plan.UpdatedAt.UTC(),
+		Version:     plan.Version,
+	}
+	if err := mkdirAllFunc(s.planDir(plan.ID), defaultDirPerm); err != nil {
+		return err
+	}
+	if err := mkdirAllFunc(s.planTasksDir(plan.ID), defaultDirPerm); err != nil {
+		return err
+	}
+	if err := mkdirAllFunc(s.planHistoryDir(plan.ID), defaultDirPerm); err != nil {
+		return err
+	}
+	if err := mkdirAllFunc(s.sessionsDir(), defaultDirPerm); err != nil {
+		return err
+	}
+
+	current := map[string]TaskSummary{}
+	manifest.Tasks = manifest.Tasks[:0]
+	sortTasks(plan.Tasks)
+	for i := range plan.Tasks {
+		task := &plan.Tasks[i]
+		if task.Name == "" {
+			task.Name = fmt.Sprintf("Task %s", task.ID)
+		}
+		task.Path = s.taskFilePath(plan.ID, task.ID, task.Status)
+		if task.Status == StatusComplete {
+			task.ClaimPath = ""
+		} else {
+			task.ClaimPath = s.claimPath(plan.ID, task.ID)
+		}
+		if err := s.writeTaskRecord(task.Path, *task); err != nil {
+			return err
+		}
+		if task.ClaimedBy != "" && task.Status != StatusComplete && task.Status != StatusCancelled && task.Status != StatusBlocked {
+			claimedAt := time.Now().UTC()
+			if task.ClaimedAt != nil {
+				claimedAt = task.ClaimedAt.UTC()
+			}
+			if err := atomicWriteJSON(task.ClaimPath, ClaimInfo{
+				By:        task.ClaimedBy,
+				ClaimedAt: claimedAt,
+				Host:      os.Getenv("HOSTNAME"),
+				PID:       os.Getpid(),
+			}); err != nil {
+				return err
+			}
+		} else if task.ClaimPath != "" {
+			if err := removeFileFunc(task.ClaimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		} else {
+			if err := removeFileFunc(s.claimPath(plan.ID, task.ID)); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+		if previous, ok := previousFiles[task.ID]; ok {
+			if previous.Path != "" && previous.Path != task.Path {
+				if err := removeFileFunc(previous.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+			}
+			if previous.ClaimPath != "" && previous.ClaimPath != task.ClaimPath {
+				if err := removeFileFunc(previous.ClaimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+			}
+		}
+		summary := summaryFromRecord(*task)
+		current[task.ID] = summary
+		manifest.Tasks = append(manifest.Tasks, summary)
+	}
+	for id, previous := range previousFiles {
+		if _, ok := current[id]; ok {
+			continue
+		}
+		if previous.Path != "" {
+			if err := removeFileFunc(previous.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+		if previous.ClaimPath != "" {
+			if err := removeFileFunc(previous.ClaimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
+	}
+	sortSummaries(manifest.Tasks)
+	manifest.UpdatedAt = plan.UpdatedAt.UTC()
+	if manifest.NextSequence == 0 {
+		manifest.NextSequence = maxSequence(plan.Tasks) + 1
+	}
+
+	if err := atomicWriteJSON(s.planInfoPath(plan.ID), record); err != nil {
+		return err
+	}
+	if err := atomicWriteJSON(s.planManifestPath(plan.ID), manifest); err != nil {
+		return err
 	}
 	return nil
 }
 
-func dependenciesReady(task TaskSummary, taskByID map[string]TaskSummary) bool {
-	for _, depID := range task.DependsOn {
-		dep, ok := taskByID[depID]
-		if !ok || dep.Status != StatusComplete {
-			return false
-		}
+func (s *Store) loadPlan(planID string) (*Plan, *Manifest, error) {
+	record, err := s.loadPlanRecord(planID)
+	if err != nil {
+		return nil, nil, err
 	}
-	return true
+	manifest, err := s.loadManifest(planID)
+	if err != nil {
+		return nil, nil, err
+	}
+	records := make([]TaskRecord, 0, len(manifest.Tasks))
+	for _, summary := range manifest.Tasks {
+		path := summary.Path
+		if path == "" {
+			path = s.taskFilePath(planID, summary.ID, summary.Status)
+		}
+		recordTask, err := s.readTaskRecord(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		if summary.ClaimPath != "" {
+			recordTask.ClaimPath = summary.ClaimPath
+		} else if recordTask.Status != StatusComplete {
+			recordTask.ClaimPath = s.claimPath(planID, recordTask.ID)
+		}
+		if recordTask.Status != StatusComplete {
+			if data, err := readFileFunc(s.claimPath(planID, recordTask.ID)); err == nil {
+				var claim ClaimInfo
+				if err := json.Unmarshal(data, &claim); err == nil {
+					recordTask.ClaimedBy = claim.By
+					recordTask.Assignee = claim.By
+					claimedAt := claim.ClaimedAt.UTC()
+					recordTask.ClaimedAt = &claimedAt
+				}
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return nil, nil, err
+			}
+		}
+		records = append(records, recordTask)
+	}
+	plan := &Plan{
+		ID:          record.ID,
+		Name:        record.Name,
+		Description: record.Description,
+		SpecPath:    record.SpecPath,
+		Tasks:       records,
+		SessionIDs:  append([]string(nil), record.SessionIDs...),
+		CreatedAt:   record.CreatedAt.UTC(),
+		UpdatedAt:   record.UpdatedAt.UTC(),
+		Version:     record.Version,
+	}
+	return plan, &manifest, nil
 }
 
-func (s *Store) loadManifest() (Manifest, error) {
-	data, err := readFileFunc(s.manifestPath())
+func (s *Store) loadPlanRecord(planID string) (PlanRecord, error) {
+	data, err := readFileFunc(s.planInfoPath(planID))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return PlanRecord{}, ErrPlanNotInitialized
+		}
+		return PlanRecord{}, err
+	}
+	var record PlanRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		return PlanRecord{}, err
+	}
+	return record, nil
+}
+
+func (s *Store) loadManifest(planID string) (Manifest, error) {
+	data, err := readFileFunc(s.planManifestPath(planID))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return Manifest{}, ErrPlanNotInitialized
@@ -560,15 +954,254 @@ func (s *Store) loadManifest() (Manifest, error) {
 	return manifest, nil
 }
 
-func (s *Store) writeManifest(manifest Manifest) error {
+func (s *Store) ensureWorkspaceLocked() error {
 	if err := mkdirAllFunc(s.MetaDir, defaultDirPerm); err != nil {
 		return err
 	}
-	data, err := jsonMarshalIndent(manifest, "", "  ")
+	if err := mkdirAllFunc(s.plansDir(), defaultDirPerm); err != nil {
+		return err
+	}
+	if err := mkdirAllFunc(s.sessionsDir(), defaultDirPerm); err != nil {
+		return err
+	}
+	if _, err := statFunc(s.workspacePath()); err == nil {
+		workspace, err := s.loadWorkspace()
+		if err != nil {
+			return err
+		}
+		if workspace.DefaultPlanID == "" {
+			workspace.DefaultPlanID = defaultPlanID
+			workspace.UpdatedAt = time.Now().UTC()
+			if err := s.saveWorkspace(workspace); err != nil {
+				return err
+			}
+		}
+		if _, err := statFunc(s.planDir(workspace.DefaultPlanID)); errors.Is(err, os.ErrNotExist) {
+			return s.createDefaultPlanLocked(workspace.DefaultPlanID, defaultPlanName)
+		}
+		return nil
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	now := time.Now().UTC()
+	workspace := Workspace{
+		Version:       currentStoreFormat,
+		DefaultPlanID: defaultPlanID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	if err := s.saveWorkspace(workspace); err != nil {
+		return err
+	}
+	return s.createDefaultPlanLocked(defaultPlanID, defaultPlanName)
+}
+
+func (s *Store) createDefaultPlanLocked(planID, name string) error {
+	now := time.Now().UTC()
+	plan := &Plan{
+		ID:        planID,
+		Name:      name,
+		CreatedAt: now,
+		UpdatedAt: now,
+		Version:   1,
+	}
+	manifest := &Manifest{
+		Version:      1,
+		PlanID:       planID,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+		NextSequence: 1,
+		Tasks:        []TaskSummary{},
+	}
+	return s.persistPlanLocked(plan, manifest, nil)
+}
+
+func (s *Store) migrateLegacyLocked() error {
+	if _, err := statFunc(s.workspacePath()); err == nil {
+		return nil
+	}
+	legacyManifestPath := filepath.Join(s.MetaDir, manifestFileName)
+	if _, err := statFunc(legacyManifestPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	data, err := readFileFunc(legacyManifestPath)
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(s.manifestPath(), data, defaultTaskPerm)
+	var legacy Manifest
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	workspace := Workspace{
+		Version:       currentStoreFormat,
+		DefaultPlanID: defaultPlanID,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	if err := s.saveWorkspace(workspace); err != nil {
+		return err
+	}
+	plan := &Plan{
+		ID:        defaultPlanID,
+		Name:      defaultPlanName,
+		CreatedAt: legacy.CreatedAt,
+		UpdatedAt: legacy.UpdatedAt,
+		Version:   1,
+	}
+	if plan.CreatedAt.IsZero() {
+		plan.CreatedAt = now
+	}
+	if plan.UpdatedAt.IsZero() {
+		plan.UpdatedAt = now
+	}
+	legacy.PlanID = defaultPlanID
+	manifest := &Manifest{
+		Version:      1,
+		PlanID:       defaultPlanID,
+		CreatedAt:    plan.CreatedAt,
+		UpdatedAt:    plan.UpdatedAt,
+		NextSequence: legacy.NextSequence,
+	}
+	if manifest.NextSequence == 0 {
+		manifest.NextSequence = 1
+	}
+	records := make([]TaskRecord, 0, len(legacy.Tasks))
+	for _, summary := range legacy.Tasks {
+		sourcePath := summary.Path
+		if sourcePath == "" {
+			sourcePath = filepath.Join(s.MetaDir, taskPathForStatus(summary.ID, summary.Status))
+		}
+		if summary.Status == StatusComplete {
+			sourcePath = filepath.Join(s.MetaDir, historyDirName, summary.ID+".done")
+		} else if strings.HasSuffix(sourcePath, ".done") {
+			sourcePath = filepath.Join(s.MetaDir, historyDirName, summary.ID+".done")
+		}
+		record, err := s.readTaskRecord(sourcePath)
+		if err != nil {
+			return err
+		}
+		records = append(records, record)
+	}
+	plan.Tasks = records
+	if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
+		return err
+	}
+	if err := removeFileFunc(legacyManifestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := removeFileFunc(filepath.Join(s.MetaDir, manifestLockName)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := removeLegacyDirs(s.MetaDir); err != nil {
+		return err
+	}
+	return nil
+}
+
+func removeLegacyDirs(metaDir string) error {
+	for _, name := range []string{tasksDirName, historyDirName} {
+		path := filepath.Join(metaDir, name)
+		if err := removeAllFunc(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) loadWorkspace() (Workspace, error) {
+	data, err := readFileFunc(s.workspacePath())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return Workspace{}, ErrPlanNotInitialized
+		}
+		return Workspace{}, err
+	}
+	var workspace Workspace
+	if err := json.Unmarshal(data, &workspace); err != nil {
+		return Workspace{}, err
+	}
+	if workspace.Version == 0 {
+		workspace.Version = currentStoreFormat
+	}
+	if workspace.DefaultPlanID == "" {
+		workspace.DefaultPlanID = defaultPlanID
+	}
+	return workspace, nil
+}
+
+func (s *Store) saveWorkspace(workspace Workspace) error {
+	if err := mkdirAllFunc(s.MetaDir, defaultDirPerm); err != nil {
+		return err
+	}
+	return atomicWriteJSON(s.workspacePath(), workspace)
+}
+
+func (s *Store) removeSessionFromOtherPlans(planID, sessionID string) error {
+	plans, err := s.ListPlans()
+	if err != nil {
+		return err
+	}
+	for _, summary := range plans {
+		if summary.ID == planID || !containsID(summary.SessionIDs, sessionID) {
+			continue
+		}
+		currentPlan, manifest, err := s.loadPlan(summary.ID)
+		if err != nil {
+			return err
+		}
+		filtered := make([]string, 0, len(currentPlan.SessionIDs))
+		for _, candidate := range currentPlan.SessionIDs {
+			if candidate != sessionID {
+				filtered = append(filtered, candidate)
+			}
+		}
+		currentPlan.SessionIDs = filtered
+		currentPlan.touch()
+		if err := s.persistPlanLocked(currentPlan, manifest, nil); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) removeBindingsForPlan(planID string) error {
+	entries, err := readDirFunc(s.sessionsDir())
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		path := filepath.Join(s.sessionsDir(), entry.Name())
+		data, err := readFileFunc(path)
+		if err != nil {
+			return err
+		}
+		var binding SessionBinding
+		if err := json.Unmarshal(data, &binding); err != nil {
+			return err
+		}
+		if binding.PlanID != planID {
+			continue
+		}
+		if err := removeFileFunc(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) saveSessionBinding(binding *SessionBinding) error {
+	return atomicWriteJSON(s.sessionBindingPath(binding.SessionID), binding)
 }
 
 func (s *Store) readTaskRecord(path string) (TaskRecord, error) {
@@ -581,11 +1214,9 @@ func (s *Store) readTaskRecord(path string) (TaskRecord, error) {
 		return TaskRecord{}, err
 	}
 	record.Path = path
-	id := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-	id = strings.TrimSuffix(id, ".done")
-	record.ClaimPath = s.claimPath(record.ID)
-	if record.ID == "" {
-		record.ID = id
+	record.ClaimPath = filepath.Join(filepath.Dir(path), record.ID+".claim")
+	if record.Status == StatusComplete {
+		record.ClaimPath = ""
 	}
 	return record, nil
 }
@@ -598,133 +1229,76 @@ func (s *Store) writeTaskRecord(path string, record TaskRecord) error {
 	if err != nil {
 		return err
 	}
-	return atomicWriteFile(path, data, defaultTaskPerm)
+	return atomicWriteFile(path, data, defaultPlanPerm)
 }
 
-func (s *Store) hydrateSummary(summary TaskSummary) (TaskSummary, error) {
-	if summary.Path == "" {
-		if summary.Status == StatusComplete {
-			summary.Path = s.historyPath(summary.ID)
-		} else {
-			summary.Path = s.taskPath(summary.ID)
-		}
-	}
-	if summary.Status != StatusComplete && summary.Status != StatusCancelled {
-		summary.ClaimPath = s.claimPath(summary.ID)
-		if data, err := readFileFunc(summary.ClaimPath); err == nil {
-			var claim ClaimInfo
-			if err := json.Unmarshal(data, &claim); err == nil {
-				summary.ClaimedBy = claim.By
-				summary.Assignee = claim.By
-				claimedAt := claim.ClaimedAt.UTC()
-				summary.ClaimedAt = &claimedAt
-			}
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return TaskSummary{}, err
-		} else {
-			summary.ClaimedBy = ""
-			summary.ClaimedAt = nil
-		}
-	}
-	return summary, nil
+func (s *Store) withWorkspaceLock(fn func() error) error {
+	return withLock(s.workspaceLockPath(), fn)
 }
 
-func summaryFromRecord(record TaskRecord) TaskSummary {
-	return TaskSummary{
-		ID:                 record.ID,
-		Sequence:           record.Sequence,
-		Title:              record.Title,
-		Status:             record.Status,
-		Order:              record.Order,
-		DependsOn:          normalizeIDs(record.DependsOn),
-		Assignee:           record.Assignee,
-		BlockedReason:      record.BlockedReason,
-		Output:             record.Output,
-		CreatedAt:          record.CreatedAt.UTC(),
-		UpdatedAt:          record.UpdatedAt.UTC(),
-		ClaimedBy:          record.ClaimedBy,
-		ClaimedAt:          record.ClaimedAt,
-		CompletedAt:        record.CompletedAt,
-		ArchivedAt:         record.ArchivedAt,
-		Path:               record.Path,
-		ClaimPath:          record.ClaimPath,
-		DescriptionPreview: preview(record.Description),
-	}
-}
-
-func parseTaskRecord(data []byte) (TaskRecord, error) {
-	text := string(data)
-	if !strings.HasPrefix(text, "---\n") {
-		return TaskRecord{}, fmt.Errorf("task file missing yaml frontmatter")
-	}
-	rest := strings.TrimPrefix(text, "---\n")
-	end := strings.Index(rest, "\n---\n")
-	if end < 0 {
-		return TaskRecord{}, fmt.Errorf("task file frontmatter is not terminated")
-	}
-	frontmatter := rest[:end]
-	body := rest[end+5:]
-
-	var record TaskRecord
-	if err := yamlUnmarshalFunc([]byte(frontmatter), &record); err != nil {
-		return TaskRecord{}, err
-	}
-	record.Description = strings.TrimSpace(body)
-	return record, nil
-}
-
-func marshalTaskRecord(record TaskRecord) ([]byte, error) {
-	record.Path = ""
-	record.ClaimPath = ""
-	body := strings.TrimSpace(record.Description)
-	frontmatter, err := yamlMarshalFunc(record)
-	if err != nil {
-		return nil, err
-	}
-	builder := strings.Builder{}
-	builder.WriteString("---\n")
-	builder.Write(frontmatter)
-	builder.WriteString("---\n")
-	if body != "" {
-		builder.WriteString("\n")
-		builder.WriteString(body)
-		builder.WriteString("\n")
-	}
-	return []byte(builder.String()), nil
-}
-
-func (s *Store) withManifestLock(fn func() error) error {
-	if err := mkdirAllFunc(s.MetaDir, defaultDirPerm); err != nil {
+func (s *Store) withPlanLock(planID string, fn func() error) error {
+	if err := mkdirAllFunc(s.planDir(planID), defaultDirPerm); err != nil {
 		return err
 	}
-	deadline := time.Now().Add(lockWaitTimeout)
+	return withLock(s.planLockPath(planID), fn)
+}
+
+func withLock(path string, fn func() error) error {
+	if err := mkdirAllFunc(filepath.Dir(path), defaultDirPerm); err != nil {
+		return err
+	}
 	lockPayload := map[string]any{
 		"pid":        os.Getpid(),
 		"host":       os.Getenv("HOSTNAME"),
 		"created_at": time.Now().UTC().Format(time.RFC3339Nano),
 	}
+	deadline := time.Now().Add(lockWaitTimeout)
 	for {
-		err := s.writeExclusiveJSON(s.lockPath(), lockPayload)
+		err := writeExclusiveJSON(path, lockPayload)
 		if err == nil {
-			defer func() { _ = removeFileFunc(s.lockPath()) }()
+			defer func() { _ = removeFileFunc(path) }()
 			return fn()
 		}
 		if !errors.Is(err, os.ErrExist) {
 			return err
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for manifest lock")
+			return fmt.Errorf("timed out waiting for lock")
 		}
 		time.Sleep(lockPollInterval)
 	}
 }
 
-func (s *Store) writeExclusiveJSON(path string, value any) error {
+func createClaim(path, by string) (ClaimInfo, error) {
+	claim := ClaimInfo{
+		By:        by,
+		ClaimedAt: time.Now().UTC(),
+		Host:      os.Getenv("HOSTNAME"),
+		PID:       os.Getpid(),
+	}
+	if err := writeExclusiveJSON(path, claim); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return ClaimInfo{}, ErrTaskAlreadyClaimed
+		}
+		return ClaimInfo{}, err
+	}
+	return claim, nil
+}
+
+func writeExclusiveJSON(path string, value any) error {
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return err
 	}
-	return writeExclusiveFile(path, data, defaultTaskPerm)
+	return writeExclusiveFile(path, data, defaultPlanPerm)
+}
+
+func atomicWriteJSON(path string, value any) error {
+	data, err := jsonMarshalIndent(value, "", "  ")
+	if err != nil {
+		return err
+	}
+	return atomicWriteFile(path, data, defaultPlanPerm)
 }
 
 func writeExclusiveFile(path string, data []byte, perm os.FileMode) error {
@@ -799,7 +1373,8 @@ func findWorkspaceRoot(root string) (string, error) {
 	}
 	current := start
 	for {
-		if _, err := statFunc(filepath.Join(current, metaDirName)); err == nil {
+		metaDir := filepath.Join(current, metaDirName)
+		if _, err := statFunc(metaDir); err == nil {
 			return current, nil
 		}
 		parent := filepath.Dir(current)
@@ -814,15 +1389,15 @@ func normalizeIDs(ids []string) []string {
 	seen := map[string]struct{}{}
 	normalized := make([]string, 0, len(ids))
 	for _, id := range ids {
-		id = strings.TrimSpace(id)
-		if id == "" {
+		cleaned := strings.TrimSpace(id)
+		if cleaned == "" {
 			continue
 		}
-		if _, ok := seen[id]; ok {
+		if _, ok := seen[cleaned]; ok {
 			continue
 		}
-		seen[id] = struct{}{}
-		normalized = append(normalized, id)
+		seen[cleaned] = struct{}{}
+		normalized = append(normalized, cleaned)
 	}
 	return normalized
 }
@@ -836,13 +1411,131 @@ func sortSummaries(tasks []TaskSummary) {
 	})
 }
 
-func findSummaryIndex(tasks []TaskSummary, id string) int {
-	for i, task := range tasks {
-		if task.ID == id {
-			return i
+func summaryFromRecord(record TaskRecord) TaskSummary {
+	return TaskSummary{
+		ID:                 record.ID,
+		Sequence:           record.Sequence,
+		Name:               record.Name,
+		Status:             record.Status,
+		Order:              record.Order,
+		ParentID:           record.ParentID,
+		AssignedSessionID:  record.AssignedSessionID,
+		DependsOn:          normalizeIDs(record.DependsOn),
+		Assignee:           record.Assignee,
+		BlockedReason:      record.BlockedReason,
+		Output:             record.Output,
+		CreatedAt:          record.CreatedAt.UTC(),
+		UpdatedAt:          record.UpdatedAt.UTC(),
+		ClaimedBy:          record.ClaimedBy,
+		ClaimedAt:          record.ClaimedAt,
+		CompletedAt:        record.CompletedAt,
+		ArchivedAt:         record.ArchivedAt,
+		Path:               record.Path,
+		ClaimPath:          record.ClaimPath,
+		DescriptionPreview: preview(record.Description),
+	}
+}
+
+func parseTaskRecord(data []byte) (TaskRecord, error) {
+	text := string(data)
+	if !strings.HasPrefix(text, "---\n") {
+		return TaskRecord{}, fmt.Errorf("task file missing yaml frontmatter")
+	}
+	rest := strings.TrimPrefix(text, "---\n")
+	end := strings.Index(rest, "\n---\n")
+	if end < 0 {
+		return TaskRecord{}, fmt.Errorf("task file frontmatter is not terminated")
+	}
+	frontmatter := rest[:end]
+	body := rest[end+5:]
+	type legacyTaskRecord struct {
+		TaskRecord `yaml:",inline"`
+		Title      string `yaml:"title"`
+	}
+	var record legacyTaskRecord
+	if err := yamlUnmarshalFunc([]byte(frontmatter), &record); err != nil {
+		return TaskRecord{}, err
+	}
+	task := record.TaskRecord
+	if task.Name == "" {
+		task.Name = strings.TrimSpace(record.Title)
+	}
+	task.Description = strings.TrimSpace(body)
+	return task, nil
+}
+
+func marshalTaskRecord(record TaskRecord) ([]byte, error) {
+	record.Path = ""
+	record.ClaimPath = ""
+	body := strings.TrimSpace(record.Description)
+	frontmatter, err := yamlMarshalFunc(record)
+	if err != nil {
+		return nil, err
+	}
+	builder := strings.Builder{}
+	builder.WriteString("---\n")
+	builder.Write(frontmatter)
+	builder.WriteString("---\n")
+	if body != "" {
+		builder.WriteString("\n")
+		builder.WriteString(body)
+		builder.WriteString("\n")
+	}
+	return []byte(builder.String()), nil
+}
+
+func randomID() (string, error) {
+	buf := make([]byte, 4)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func resolveCurrentSessionID() string {
+	for _, key := range []string{
+		"AGENT_DASHBOARD_SESSION_ID",
+		"CODEX_THREAD_ID",
+		"AGENT_SESSION_ID",
+	} {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return value
 		}
 	}
-	return -1
+	return ""
+}
+
+func firstAssignedTask(plan *Plan, sessionID string) *TaskRecord {
+	for _, task := range plan.IterTasksInDisplayOrder() {
+		if task.AssignedSessionID != sessionID {
+			continue
+		}
+		if task.Status == StatusComplete || task.Status == StatusCancelled {
+			continue
+		}
+		copy := task
+		return &copy
+	}
+	return nil
+}
+
+func containsID(values []string, candidate string) bool {
+	for _, value := range values {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func maxSequence(tasks []TaskRecord) int {
+	max := 0
+	for _, task := range tasks {
+		if task.Sequence > max {
+			max = task.Sequence
+		}
+	}
+	return max
 }
 
 func slugify(input string) string {
@@ -886,10 +1579,11 @@ func preview(text string) string {
 
 func defaultActor() string {
 	for _, key := range []string{
-		"AGENT_TODO_ASSIGNEE",
+		"AGENT_PLAN_ASSIGNEE",
 		"AGENT_NAME",
 		"AGENT_DASHBOARD_SESSION_ID",
 		"CODEX_THREAD_ID",
+		"AGENT_SESSION_ID",
 	} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value
@@ -907,4 +1601,50 @@ func defaultActor() string {
 	default:
 		return fmt.Sprintf("pid-%d", os.Getpid())
 	}
+}
+
+func taskPathForStatus(id string, status Status) string {
+	if status == StatusComplete {
+		return filepath.Join(historyDirName, id+".done")
+	}
+	return filepath.Join(tasksDirName, id+".md")
+}
+
+func (s *Store) workspacePath() string        { return filepath.Join(s.MetaDir, workspaceFileName) }
+func (s *Store) workspaceLockPath() string    { return filepath.Join(s.MetaDir, workspaceLockName) }
+func (s *Store) plansDir() string             { return filepath.Join(s.MetaDir, plansDirName) }
+func (s *Store) sessionsDir() string          { return filepath.Join(s.MetaDir, sessionsDirName) }
+func (s *Store) planDir(planID string) string { return filepath.Join(s.plansDir(), planID) }
+func (s *Store) planInfoPath(planID string) string {
+	return filepath.Join(s.planDir(planID), planFileName)
+}
+func (s *Store) planManifestPath(planID string) string {
+	return filepath.Join(s.planDir(planID), manifestFileName)
+}
+func (s *Store) planLockPath(planID string) string {
+	return filepath.Join(s.planDir(planID), manifestLockName)
+}
+func (s *Store) planTasksDir(planID string) string {
+	return filepath.Join(s.planDir(planID), tasksDirName)
+}
+func (s *Store) planHistoryDir(planID string) string {
+	return filepath.Join(s.planDir(planID), historyDirName)
+}
+func (s *Store) taskPath(planID, id string) string {
+	return filepath.Join(s.planTasksDir(planID), id+".md")
+}
+func (s *Store) claimPath(planID, id string) string {
+	return filepath.Join(s.planTasksDir(planID), id+".claim")
+}
+func (s *Store) historyPath(planID, id string) string {
+	return filepath.Join(s.planHistoryDir(planID), id+".done")
+}
+func (s *Store) taskFilePath(planID, id string, status Status) string {
+	if status == StatusComplete {
+		return s.historyPath(planID, id)
+	}
+	return s.taskPath(planID, id)
+}
+func (s *Store) sessionBindingPath(sessionID string) string {
+	return filepath.Join(s.sessionsDir(), sessionID+".json")
 }

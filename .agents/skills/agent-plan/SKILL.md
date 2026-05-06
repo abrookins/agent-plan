@@ -1,99 +1,119 @@
 ---
 name: agent-plan
-description: Manage shared workspace plans with the agent-plan CLI and MCP server. Use when the user wants a repo-local task list, shared planning across agents, task claiming, or machine-readable plan state. Trigger phrases include "agent-plan", "shared plan", "claim the next task", "mark this done", "block this task", and "task list".
+description: Manage shared workspace plans with the agent-plan CLI and MCP server. Use when the user wants explicit shared planning, multi-agent coordination, machine-readable task state, or session-aware task claiming.
 ---
 
 # agent-plan
 
-Use `agent-plan` when work should be tracked in a workspace-local `.agent-plan/`
-directory that multiple agents can read and update.
+Use `agent-plan` when work should be tracked in a workspace-local
+`.agent-plan/` store that multiple agents or sessions can read and update.
 
 ## When To Use It
 
 - The user explicitly wants a shared plan or task list.
 - Multiple agents or sessions need to coordinate work.
 - The repo already contains a `.agent-plan/` directory.
-- You need machine-readable task state through `--json` or MCP tools.
+- You need JSON or MCP output for plan and task state.
 
 Do not use it for a one-off task unless the user wants explicit tracking.
 
 ## Core Workflow
 
-### 1. Check or initialize the workspace
+### 1. Initialize or inspect the workspace
 
 ```bash
 command -v agent-plan
-agent-plan plan show --json
 agent-plan init
+agent-plan list --json
 ```
 
-- Use `agent-plan init` only when the workspace does not already have
-  `.agent-plan/`.
+- Use `agent-plan init` only when the workspace is not already initialized.
 - Add `--dir <workspace-root>` when you are outside the target workspace.
 
-### 2. Inspect current work
+### 2. Load the relevant plan
 
 ```bash
 agent-plan list --json
-agent-plan next --json
+agent-plan get <plan-id> --json
+agent-plan ready <plan-id> --json
+```
+
+- Prefer `get --json` for a cold start on a known plan.
+- Prefer `ready --json` when you need actionable tasks only.
+
+### 3. Bind or claim session-specific work
+
+```bash
+agent-plan bind-current <plan-id> --json
+agent-plan bind-session <plan-id> --session <session-id> --json
+agent-plan next <plan-id> --session <session-id> --json
+agent-plan claim-next <plan-id> --session <session-id> --json
+```
+
+- Use `bind-current` when the current runtime already exposes a session ID in
+  environment variables.
+- Use `claim-next` when you need exclusive ownership before editing files.
+
+### 4. Update the plan as work changes
+
+```bash
+agent-plan add-task <plan-id> "Task title" --description "Why it is needed" --json
+agent-plan update-task <plan-id> <task-id> --status in_progress --json
+agent-plan update-task <plan-id> <task-id> --status complete --json
+agent-plan update-task <plan-id> <task-id> --depends-on <other-task-id> --json
+agent-plan delete-task <plan-id> <task-id> --json
+```
+
+- Use `add-task` for newly discovered work in the same plan.
+- Use `--depends-on` for blocking relationships.
+- Use `--parent` only when you want hierarchy or subtasks.
+
+## Compatibility Aliases
+
+The tool also keeps a default-plan workflow for older callers:
+
+```bash
+agent-plan add "Task title" --json
+agent-plan claim <task-id> --json
+agent-plan done <task-id> --output "Result" --json
+agent-plan block <task-id> --reason "Blocked because ..." --json
 agent-plan plan show --json
 ```
 
-- Prefer `plan show --json` for a cold start.
-- Prefer `next --json` when you want the next ready task.
-
-### 3. Claim work before changing it
-
-```bash
-agent-plan claim <task-id> --json
-```
-
-- Claims are coordinated through exclusive creation of `tasks/*.claim`.
-- If a task is already claimed, pick different work or ask the user how to
-  resolve contention.
-
-### 4. Update task state as work progresses
-
-```bash
-agent-plan add "Task title" --description "Why it is needed" --json
-agent-plan block <task-id> --reason "What is blocking it" --json
-agent-plan done <task-id> --output "Result or artifact" --json
-```
-
-- Use `add` for newly discovered work that belongs in the same plan.
-- Use `block` instead of leaving work ambiguous when progress is stopped.
-- Use `done` when the task is complete and you can record the outcome.
-
-## JSON Preference
-
-When an agent needs to consume command output programmatically, prefer:
-
-- `agent-plan list --json`
-- `agent-plan next --json`
-- `agent-plan claim <id> --json`
-- `agent-plan done <id> --json`
-- `agent-plan block <id> --json`
-- `agent-plan plan show --json`
-
-The `mcp` subcommand does not use `--json`; it speaks MCP over stdio.
+Prefer the multi-plan commands when the user is explicitly coordinating shared
+work across several plans.
 
 ## MCP Surface
 
-The MCP server exposes:
+Prefer MCP when the host agent already wants tool calls instead of shell calls.
 
-- `plan_init`
-- `plan_add`
+Primary MCP tools:
+
+- `plan_create`
 - `plan_list`
+- `plan_get`
+- `plan_update`
+- `plan_delete`
+- `plan_add_task`
+- `plan_update_task`
+- `plan_delete_task`
+- `plan_ready`
 - `plan_next`
+- `plan_claim_next`
+- `plan_bind_session`
+- `plan_bind_current`
+- `plan_install`
+
+Compatibility MCP tools:
+
+- `plan_add`
 - `plan_claim`
 - `plan_done`
 - `plan_block`
 - `plan_show`
 
-Use MCP when the host agent already prefers MCP tool calls over shell commands.
-
 ## Notes
 
-- Treat `tasks/*.md` as the durable task record.
-- Treat `tasks/*.claim` and `manifest.lock` as coordination state.
+- Treat `tasks/*.md` and `history/*.done` as durable records.
+- Treat `tasks/*.claim`, `manifest.lock`, and `sessions/*.json` as coordination state.
 - Prefer the CLI or MCP tools over editing `.agent-plan/` files by hand.

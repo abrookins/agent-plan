@@ -1,15 +1,17 @@
 # agent-plan
 
 `agent-plan` is a filesystem-backed planning tool for agents and teams. It
-provides a CLI, an MCP stdio server, and an importable Go library for managing
-shared task state in a workspace-local `.agent-plan/` directory.
+stores shared plan state in a workspace-local `.agent-plan/` directory and
+exposes the same workflow through a CLI, an MCP stdio server, and an importable
+Go package.
 
-It is designed for both single-agent and multi-agent workflows:
+The current Go implementation supports:
 
-- active tasks live in markdown files
-- claims are coordinated through exclusive file creation
-- a manifest provides fast listing and machine-friendly queries
-- completed work moves into history for auditability
+- multiple named plans per workspace
+- ordered tasks with hierarchy and dependencies
+- session-aware task selection and claiming
+- JSON output for agent-facing commands
+- compatibility aliases for the earlier default-plan workflow
 
 ## Install
 
@@ -19,129 +21,149 @@ From the repo root:
 make install
 ```
 
-That installs the binary into `$(go env GOBIN)` when `GOBIN` is set, or
-`$(go env GOPATH)/bin` otherwise. Make sure that directory is on your `PATH`,
-then you can run:
-
-```bash
-agent-plan help
-```
+That installs `agent-plan` into `$(go env GOBIN)` when `GOBIN` is set, or
+`$(go env GOPATH)/bin` otherwise.
 
 ## Build
 
-To build a local binary from the repo root:
-
 ```bash
 make build
-```
-
-That writes the native binary to `dist/agent-plan`.
-
-To build the common release targets:
-
-```bash
 make build-all
-```
-
-That produces binaries for:
-
-- `darwin/amd64`
-- `darwin/arm64`
-- `linux/amd64`
-- `linux/arm64`
-- `windows/amd64`
-- `windows/arm64`
-
-Other useful targets:
-
-```bash
 make test
 make clean
 ```
 
-If you prefer the raw Go command, the binary entry point lives under
-`./cmd/agent-plan`, so the direct form is:
+The direct Go build entry point is:
 
 ```bash
 go build -o dist/agent-plan ./cmd/agent-plan
 ```
 
-## Layout
+## Workspace Layout
 
 ```text
 .agent-plan/
-  manifest.json
-  manifest.lock
-  tasks/
-    001-fix-auth.md
-    001-fix-auth.claim
-  history/
-    001-fix-auth.done
+  workspace.json
+  sessions/
+    <session-id>.json
+  plans/
+    <plan-id>/
+      plan.json
+      manifest.json
+      manifest.lock
+      tasks/
+        <task-id>.md
+        <task-id>.claim
+      history/
+        <task-id>.done
 ```
 
-- `manifest.json` is the query index for fast task listing and agent consumption.
-- `tasks/*.md` is the source of truth for active tasks.
-- `tasks/*.claim` is the task-claim coordination primitive.
-- `history/*.done` preserves completed task records for auditability.
+- `workspace.json` tracks store version and the default plan used by legacy
+  aliases such as `add`, `claim`, `done`, `block`, and `plan show`.
+- `plan.json` stores plan metadata such as name, description, spec path, and
+  scoped session IDs.
+- `manifest.json` is the per-plan task summary index used for fast reads.
+- `tasks/*.md` is the durable source of truth for active tasks.
+- `tasks/*.claim` is the exclusive-create coordination primitive.
+- `history/*.done` preserves completed task records.
+- `sessions/*.json` stores local session binding snapshots.
+
+Existing single-plan `.agent-plan/manifest.json` workspaces are migrated into
+the new multi-plan layout automatically on first open.
 
 ## Git
 
-Do not commit `.agent-plan/` by default. It is often local working state for
-one agent or one machine.
+Do not commit `.agent-plan/` by default. It often contains transient local
+coordination state.
 
 If a team wants repo-shared planning, commit the durable records:
 
-- `manifest.json`
-- `tasks/*.md`
-- `history/*.done` when you want audit history in git
+- `.agent-plan/workspace.json`
+- `.agent-plan/plans/*/plan.json`
+- `.agent-plan/plans/*/manifest.json`
+- `.agent-plan/plans/*/tasks/*.md`
+- `.agent-plan/plans/*/history/*.done` when audit history belongs in Git
 
 Do not commit the coordination files:
 
-- `manifest.lock`
-- `tasks/*.claim`
+- `.agent-plan/plans/*/manifest.lock`
+- `.agent-plan/plans/*/tasks/*.claim`
+- `.agent-plan/sessions/*.json`
 
 Example `.gitignore` entries:
 
 ```gitignore
-.agent-plan/manifest.lock
-.agent-plan/tasks/*.claim
+.agent-plan/plans/*/manifest.lock
+.agent-plan/plans/*/tasks/*.claim
+.agent-plan/sessions/*.json
 ```
 
 ## CLI
 
+Primary plan commands:
+
 ```bash
-go run ./cmd/agent-plan init
-go run ./cmd/agent-plan add "fix the auth bug" --description "Reproduce and patch"
-go run ./cmd/agent-plan list
-go run ./cmd/agent-plan next
-go run ./cmd/agent-plan claim 001-fix-auth
-go run ./cmd/agent-plan done 001-fix-auth --output "PR #47"
-go run ./cmd/agent-plan block 001-fix-auth --reason "Waiting on API contract"
-go run ./cmd/agent-plan plan show
-go run ./cmd/agent-plan mcp
+agent-plan init
+agent-plan create "Go parity" --description "Track feature work"
+agent-plan list
+agent-plan get <plan-id> --json
+agent-plan update <plan-id> --spec-path docs/parity-design.md
+agent-plan delete <plan-id> --yes
+agent-plan add-task <plan-id> "Freeze parity matrix" --description "Capture the target surface"
+agent-plan update-task <plan-id> <task-id> --status in_progress
+agent-plan delete-task <plan-id> <task-id>
+agent-plan ready <plan-id> --json
+agent-plan next <plan-id> --session <session-id> --json
+agent-plan claim-next <plan-id> --session <session-id> --json
+agent-plan bind-session <plan-id> --session <session-id>
+agent-plan bind-current <plan-id>
+agent-plan install AGENTS.md
+agent-plan mcp
 ```
 
-All commands accept `--dir <workspace-root>`. When omitted, `agent-plan`
-searches upward from the current working directory for `.agent-plan/`.
+Compatibility aliases for the workspace default plan:
 
-Commands that return plan or task data also support `--json` for agent-facing
-consumption. The `mcp` command does not, because the MCP protocol defines its
-own wire format.
+```bash
+agent-plan add "Task title" --description "Why it is needed"
+agent-plan claim <task-id>
+agent-plan done <task-id> --output "PR #47"
+agent-plan block <task-id> --reason "Waiting on another change"
+agent-plan list-tasks
+agent-plan plan show
+```
+
+All commands accept `--dir <workspace-root>`. Agent-facing commands support
+`--json`. The `mcp` command does not because MCP defines its own wire format.
 
 ## MCP
 
-The stdio server exposes:
+The stdio server exposes the full plan workflow:
 
 - `plan_init`
-- `plan_add`
+- `plan_create`
 - `plan_list`
+- `plan_get`
+- `plan_update`
+- `plan_delete`
+- `plan_add_task`
+- `plan_update_task`
+- `plan_delete_task`
+- `plan_ready`
 - `plan_next`
+- `plan_claim_next`
+- `plan_bind_session`
+- `plan_bind_current`
+- `plan_install`
+
+It also keeps compatibility helpers for the default-plan workflow:
+
+- `plan_add`
 - `plan_claim`
 - `plan_done`
 - `plan_block`
 - `plan_show`
 
-Example client config:
+Example MCP config:
 
 ```json
 {
@@ -154,21 +176,12 @@ Example client config:
 }
 ```
 
-## Agent Skill
+## Docs
 
-The repo includes an agent skill at `.agents/skills/agent-plan/SKILL.md`.
+- `docs/parity-design.md` documents the filesystem-backed parity design
+- `docs/manual-qa.md` defines the manual QA plan for the Go binary
 
-Use it when an agent should manage shared work in a workspace-local
-`.agent-plan/` directory and needs a compact workflow for:
+## Repo Skill
 
-- inspecting current plan state
-- claiming the next task
-- adding, blocking, or completing work
-- preferring `--json` output for machine consumption
-
-## AFS note
-
-On a mounted filesystem, claim files use `O_CREATE|O_EXCL` directly. If an agent
-needs to claim through an MCP interface instead of a mount, the filesystem MCP
-server needs an exclusive-create file tool so the same coordination primitive
-can be preserved remotely.
+The repo includes a local skill at `.agents/skills/agent-plan/SKILL.md` for
+agents that need a compact `agent-plan` workflow.
