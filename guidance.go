@@ -55,7 +55,7 @@ func InstallGuidance(target string, globalInstall bool, workspaceRoot string) (s
 		if err := mkdirAllFunc(filepath.Dir(destination), defaultDirPerm); err != nil {
 			return "", err
 		}
-		if err := atomicWriteFile(destination, []byte(buildPlanManagementSkill()+"\n"), defaultPlanPerm); err != nil {
+		if err := atomicWriteFile(destination, []byte(buildPlanManagementSkill()+"\n"), defaultFilePerm); err != nil {
 			return "", err
 		}
 		return destination, nil
@@ -84,7 +84,7 @@ func upsertManagedGuidance(path, guidance, startMarker, endMarker string) error 
 			updated = managedBlock
 		}
 	}
-	return atomicWriteFile(path, []byte(updated), defaultPlanPerm)
+	return atomicWriteFile(path, []byte(updated), defaultFilePerm)
 }
 
 func buildCodexGuidance() string {

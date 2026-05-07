@@ -13,10 +13,9 @@ const (
 )
 
 type Workspace struct {
-	Version       int       `json:"version"`
-	DefaultPlanID string    `json:"default_plan_id"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	Version   int       `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type PlanRecord struct {
@@ -145,19 +144,9 @@ type TaskUpdateOptions struct {
 	Order                *int
 }
 
-type ListOptions struct {
-	Status *Status
-}
-
 type ClaimInfo struct {
 	By        string    `json:"by"`
 	ClaimedAt time.Time `json:"claimed_at"`
 	Host      string    `json:"host,omitempty"`
 	PID       int       `json:"pid,omitempty"`
-}
-
-type Overview struct {
-	Plan   *Plan          `json:"plan"`
-	Counts map[string]int `json:"counts"`
-	Next   *TaskSummary   `json:"next,omitempty"`
 }

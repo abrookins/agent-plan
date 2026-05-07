@@ -48,8 +48,7 @@ on any external session-management runtime.
 
 Notes:
 
-- `workspace.json` tracks store version and the default plan ID used by legacy
-  single-plan commands.
+- `workspace.json` tracks store version and workspace-level metadata.
 - `plan.json` stores plan metadata such as `name`, `description`, `spec_path`,
   and scoped `session_ids`.
 - `manifest.json` stores the task summary index for a single plan.
@@ -76,38 +75,31 @@ The Go CLI should support the Python command set directly:
 - `agent-plan bind-current`
 - `agent-plan install`
 
-### Legacy Go aliases
+### Go command surface
 
-The existing Go commands should remain as compatibility aliases where practical:
+The Go CLI should keep a single explicit surface:
 
 - `init`
-- `add`
-- `claim`
-- `done`
-- `block`
-- `plan show`
+- `create`
+- `list`
+- `get`
+- `update`
+- `delete`
+- `add-task`
+- `update-task`
+- `delete-task`
+- `ready`
+- `next`
+- `claim-next`
+- `bind-session`
+- `bind-current`
+- `install`
 - `mcp`
-
-These commands operate on the workspace's default plan.
 
 ## Migration
 
-If a workspace contains the legacy single-plan layout:
-
-- `.agent-plan/manifest.json`
-- `.agent-plan/tasks/`
-- `.agent-plan/history/`
-
-the first write against the new store migrates that data into a generated default
-plan under `.agent-plan/plans/<default-plan-id>/` and writes `workspace.json`.
-
-The migration must preserve:
-
-- task IDs
-- ordering
-- dependencies
-- completion history
-- claim files
+The Go repo does not preserve the legacy single-plan layout. A workspace must
+be initialized into the current multi-plan structure before it can be used.
 
 ## Session Semantics
 
@@ -140,7 +132,3 @@ The MCP server should expose the full plan surface with machine-readable outputs
 - `plan_bind_session`
 - `plan_bind_current`
 - `plan_install`
-
-The existing MCP tools for `plan_init`, `plan_add`, `plan_claim`, `plan_done`,
-`plan_block`, and `plan_show` remain as compatibility helpers over the default
-plan workflow.

@@ -154,48 +154,6 @@ func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 				"global": map[string]any{"type": "boolean"},
 			}, "target"),
 		},
-
-		{
-			Name:        "plan_add",
-			Description: "Compatibility helper that adds a task to the workspace default plan.",
-			InputSchema: schema(rootSchema, map[string]any{
-				"title":       map[string]any{"type": "string"},
-				"description": map[string]any{"type": "string"},
-				"depends_on":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"order":       map[string]any{"type": "integer"},
-			}, "title"),
-		},
-		{
-			Name:        "plan_claim",
-			Description: "Compatibility helper that claims a task in the workspace default plan.",
-			InputSchema: schema(rootSchema, map[string]any{
-				"id": map[string]any{"type": "string"},
-				"by": map[string]any{"type": "string"},
-			}, "id"),
-		},
-		{
-			Name:        "plan_done",
-			Description: "Compatibility helper that completes a task in the workspace default plan.",
-			InputSchema: schema(rootSchema, map[string]any{
-				"id":     map[string]any{"type": "string"},
-				"output": map[string]any{"type": "string"},
-				"by":     map[string]any{"type": "string"},
-			}, "id"),
-		},
-		{
-			Name:        "plan_block",
-			Description: "Compatibility helper that blocks a task in the workspace default plan.",
-			InputSchema: schema(rootSchema, map[string]any{
-				"id":     map[string]any{"type": "string"},
-				"reason": map[string]any{"type": "string"},
-				"by":     map[string]any{"type": "string"},
-			}, "id", "reason"),
-		},
-		{
-			Name:        "plan_show",
-			Description: "Compatibility helper that returns the default plan overview.",
-			InputSchema: schema(rootSchema, nil),
-		},
 	}
 }
 
@@ -381,40 +339,6 @@ func (s *MCPServer) CallTool(_ context.Context, name string, args map[string]any
 			"scope":  ternary(optionalBool(args, "global"), "global", "workspace"),
 			"path":   path,
 		})
-	case "plan_add":
-		record, err := store.Add(optionalString(args, "title"), AddOptions{
-			Description: optionalString(args, "description"),
-			DependsOn:   optionalStringSlice(args, "depends_on"),
-			Order:       optionalIntPointer(args, "order"),
-		})
-		if err != nil {
-			return toolErr(err)
-		}
-		return toolOK("task added", record)
-	case "plan_claim":
-		record, err := store.Claim(optionalString(args, "id"), optionalString(args, "by"))
-		if err != nil {
-			return toolErr(err)
-		}
-		return toolOK("task claimed", record)
-	case "plan_done":
-		record, err := store.Done(optionalString(args, "id"), optionalString(args, "output"), optionalString(args, "by"))
-		if err != nil {
-			return toolErr(err)
-		}
-		return toolOK("task completed", record)
-	case "plan_block":
-		record, err := store.Block(optionalString(args, "id"), optionalString(args, "reason"), optionalString(args, "by"))
-		if err != nil {
-			return toolErr(err)
-		}
-		return toolOK("task blocked", record)
-	case "plan_show":
-		overview, err := store.Overview()
-		if err != nil {
-			return toolErr(err)
-		}
-		return toolOK("plan loaded", overview)
 	default:
 		return toolErr(fmt.Errorf("unknown tool: %s", name))
 	}

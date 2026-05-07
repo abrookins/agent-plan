@@ -269,31 +269,27 @@ Accepted environment variables:
 - `CODEX_THREAD_ID`
 - `AGENT_SESSION_ID`
 
-### QA-CLI-12: compatibility aliases operate on the default plan
+### QA-CLI-12: removed implicit-plan commands fail explicitly
 
 Steps:
 
-1. Ensure the workspace has a default plan.
-2. Run:
+1. Run:
    `add "Alias Task" --description "alias path" --json`
-3. Run:
+2. Run:
    `list-tasks --json`
-4. Run:
+3. Run:
    `claim <task-id> --json`
-5. Run:
+4. Run:
    `block <task-id> --reason "manual block" --json`
-6. Run:
+5. Run:
    `done <task-id> --output "done output" --json`
-7. Run:
+6. Run:
    `plan show --json`
 
 Expected results:
 
-- aliases operate on the workspace default plan
-- `claim` creates a `.claim` file
-- `block` sets blocked status and reason
-- `done` archives the task into `history/`
-- `plan show` returns the default plan view
+- each command exits non-zero
+- the error makes it clear the command is unsupported or unknown
 
 ### QA-CLI-13: `install` writes workspace-local guidance
 
@@ -365,7 +361,6 @@ Run `--json` for:
 - `bind-session`
 - `bind-current`
 - `install`
-- alias commands that advertise `--json`
 
 Expected results:
 
@@ -451,7 +446,7 @@ Expected results:
 - payloads reflect the same state transitions as the CLI
 - plan and task identifiers remain consistent across calls
 
-### QA-MCP-03: compatibility MCP tools still work
+### QA-MCP-03: removed implicit-plan MCP tools fail explicitly
 
 Exercise:
 
@@ -463,8 +458,7 @@ Exercise:
 
 Expected results:
 
-- each tool operates on the default plan
-- results match the compatibility CLI aliases
+- each tool returns an MCP error response
 
 ### QA-MCP-04: MCP validation failures are explicit
 
@@ -480,7 +474,7 @@ Expected results:
 - MCP error responses are returned
 - failures do not corrupt workspace state
 
-## Filesystem and Migration QA
+## Filesystem QA
 
 ### QA-FS-01: active layout matches the documented structure
 
@@ -510,7 +504,7 @@ Expected results:
 - the completed record is preserved in `history/*.done`
 - active task state no longer lists the completed item where appropriate
 
-### QA-MIG-01: legacy single-plan workspace migrates on first write
+### QA-MIG-01: legacy single-plan workspace is rejected
 
 Steps:
 
@@ -518,28 +512,25 @@ Steps:
    - `.agent-plan/manifest.json`
    - `.agent-plan/tasks/`
    - `.agent-plan/history/`
-2. Run a write command such as `add` or `create`.
-3. Inspect the resulting store.
+2. Run `list` or `create`.
 
 Expected results:
 
-- the workspace gains `workspace.json`
-- legacy data moves under `.agent-plan/plans/<default-plan-id>/`
-- task IDs, order, dependencies, claim files, and history are preserved
-- legacy aliases continue to work against the migrated default plan
+- the command fails clearly because the workspace is not initialized in the
+  current format
+- no automatic migration occurs
 
-### QA-MIG-02: migrated work remains readable through both primary and alias flows
+### QA-MIG-02: explicit commands continue to work after fresh initialization
 
 Steps:
 
-1. After migration, run:
-   - `get <default-plan-id> --json`
-   - `list-tasks --json`
-   - `plan show --json`
+1. Initialize a fresh workspace.
+2. Create a plan and add tasks.
+3. Run `get <plan-id> --json`.
 
 Expected results:
 
-- all three commands report the migrated state consistently
+- the explicit plan commands report the state consistently
 
 ## Concurrency and Coordination QA
 
@@ -583,7 +574,7 @@ Steps:
 Expected results:
 
 - state does not leak across workspaces
-- default plan behavior is scoped to the selected workspace
+- explicit plan operations stay scoped to the selected workspace
 
 ## Cleanup
 
@@ -601,10 +592,9 @@ the test created.
 Do not sign off on a release until all of the following are true:
 
 - all CLI primary commands passed
-- all CLI compatibility aliases passed
 - all documented JSON output paths were validated
 - all MCP tools passed initialize, discovery, and execution checks
-- legacy migration passed
+- legacy-workspace rejection behavior passed
 - exclusive-claim concurrency passed
 - workspace-local and global install flows passed
 - at least one Unix-like release binary passed the full suite

@@ -68,21 +68,6 @@ agent-plan delete-task <plan-id> <task-id> --json
 - Use `--depends-on` for blocking relationships.
 - Use `--parent` only when you want hierarchy or subtasks.
 
-## Compatibility Aliases
-
-The tool also keeps a default-plan workflow for older callers:
-
-```bash
-agent-plan add "Task title" --json
-agent-plan claim <task-id> --json
-agent-plan done <task-id> --output "Result" --json
-agent-plan block <task-id> --reason "Blocked because ..." --json
-agent-plan plan show --json
-```
-
-Prefer the multi-plan commands when the user is explicitly coordinating shared
-work across several plans.
-
 ## MCP Surface
 
 Prefer MCP when the host agent already wants tool calls instead of shell calls.
@@ -103,14 +88,6 @@ Primary MCP tools:
 - `plan_bind_session`
 - `plan_bind_current`
 - `plan_install`
-
-Compatibility MCP tools:
-
-- `plan_add`
-- `plan_claim`
-- `plan_done`
-- `plan_block`
-- `plan_show`
 
 ## Notes
 

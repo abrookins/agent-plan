@@ -11,7 +11,6 @@ The current Go implementation supports:
 - ordered tasks with hierarchy and dependencies
 - session-aware task selection and claiming
 - JSON output for agent-facing commands
-- compatibility aliases for the earlier default-plan workflow
 
 ## Install
 
@@ -58,8 +57,7 @@ go build -o dist/agent-plan ./cmd/agent-plan
         <task-id>.done
 ```
 
-- `workspace.json` tracks store version and the default plan used by legacy
-  aliases such as `add`, `claim`, `done`, `block`, and `plan show`.
+- `workspace.json` tracks the store version and workspace-level metadata.
 - `plan.json` stores plan metadata such as name, description, spec path, and
   scoped session IDs.
 - `manifest.json` is the per-plan task summary index used for fast reads.
@@ -67,9 +65,6 @@ go build -o dist/agent-plan ./cmd/agent-plan
 - `tasks/*.claim` is the exclusive-create coordination primitive.
 - `history/*.done` preserves completed task records.
 - `sessions/*.json` stores local session binding snapshots.
-
-Existing single-plan `.agent-plan/manifest.json` workspaces are migrated into
-the new multi-plan layout automatically on first open.
 
 ## Git
 
@@ -121,17 +116,6 @@ agent-plan install AGENTS.md
 agent-plan mcp
 ```
 
-Compatibility aliases for the workspace default plan:
-
-```bash
-agent-plan add "Task title" --description "Why it is needed"
-agent-plan claim <task-id>
-agent-plan done <task-id> --output "PR #47"
-agent-plan block <task-id> --reason "Waiting on another change"
-agent-plan list-tasks
-agent-plan plan show
-```
-
 All commands accept `--dir <workspace-root>`. Agent-facing commands support
 `--json`. The `mcp` command does not because MCP defines its own wire format.
 
@@ -154,14 +138,6 @@ The stdio server exposes the full plan workflow:
 - `plan_bind_session`
 - `plan_bind_current`
 - `plan_install`
-
-It also keeps compatibility helpers for the default-plan workflow:
-
-- `plan_add`
-- `plan_claim`
-- `plan_done`
-- `plan_block`
-- `plan_show`
 
 Example MCP config:
 

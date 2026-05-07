@@ -129,19 +129,10 @@ func TestMCPPlanLifecycle(t *testing.T) {
 	}
 }
 
-func TestMCPCompatibilityToolsAndErrors(t *testing.T) {
+func TestMCPUnknownToolErrors(t *testing.T) {
 	root := t.TempDir()
 	server := NewMCPServer(root)
 
-	if result := server.CallTool(context.Background(), "plan_add", map[string]any{"title": "Legacy"}); result.IsError {
-		t.Fatalf("plan_add result = %#v", result)
-	}
-	if result := server.CallTool(context.Background(), "plan_claim", map[string]any{"id": "missing-task"}); !result.IsError {
-		t.Fatal("plan_claim should fail for missing task id")
-	}
-	if result := server.CallTool(context.Background(), "plan_block", map[string]any{"id": "missing", "reason": "wait"}); !result.IsError {
-		t.Fatal("plan_block should fail for missing task")
-	}
 	if result := server.CallTool(context.Background(), "unknown", map[string]any{}); !result.IsError {
 		t.Fatal("unknown tool should fail")
 	}

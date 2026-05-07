@@ -41,7 +41,7 @@ func TestCLIPlanCommandsAndFlagReordering(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &plans); err != nil {
 		t.Fatalf("Unmarshal(list) error = %v", err)
 	}
-	if len(plans) != 2 {
+	if len(plans) != 1 {
 		t.Fatalf("plans = %#v", plans)
 	}
 	stdout.Reset()
@@ -150,7 +150,7 @@ func TestCLIPlanCommandsAndFlagReordering(t *testing.T) {
 	_ = impl
 }
 
-func TestCLILegacyAliases(t *testing.T) {
+func TestCLIRemovesImplicitPlanCommands(t *testing.T) {
 	root := t.TempDir()
 	stdout := bytes.Buffer{}
 	stderr := bytes.Buffer{}
@@ -158,71 +158,22 @@ func TestCLILegacyAliases(t *testing.T) {
 	if code := runCLI(context.Background(), "agent-plan", []string{"init", "--dir", root}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("init code = %d stderr=%s", code, stderr.String())
 	}
-	stdout.Reset()
-	stderr.Reset()
-
-	if code := runCLI(context.Background(), "agent-plan", []string{"add", "--dir", root, "Legacy task", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
-		t.Fatalf("add code = %d stderr=%s", code, stderr.String())
-	}
-	var task TaskRecord
-	if err := json.Unmarshal(stdout.Bytes(), &task); err != nil {
-		t.Fatalf("Unmarshal(add) error = %v", err)
-	}
-	stdout.Reset()
-	stderr.Reset()
-
-	if code := runCLI(context.Background(), "agent-plan", []string{"claim", "--dir", root, task.ID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
-		t.Fatalf("claim code = %d stderr=%s", code, stderr.String())
-	}
-	stdout.Reset()
-	stderr.Reset()
-
-	if code := runCLI(context.Background(), "agent-plan", []string{"done", "--dir", root, "--output", "ok", "--json", task.ID}, strings.NewReader(""), &stdout, &stderr); code != 0 {
-		t.Fatalf("done code = %d stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), `"status": "complete"`) {
-		t.Fatalf("done stdout = %q", stdout.String())
-	}
-	stdout.Reset()
-	stderr.Reset()
-
-	if code := runCLI(context.Background(), "agent-plan", []string{"plan", "show", "--dir", root, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
-		t.Fatalf("plan show code = %d stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), `"counts"`) {
-		t.Fatalf("plan show stdout = %q", stdout.String())
-	}
-	stdout.Reset()
-	stderr.Reset()
-
-	if code := runCLI(context.Background(), "agent-plan", []string{"list-tasks", "--dir", root, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
-		t.Fatalf("list-tasks code = %d stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), task.ID) {
-		t.Fatalf("list-tasks stdout = %q", stdout.String())
-	}
-}
-
-func TestCLILegacyAddAcceptsDocumentedFlags(t *testing.T) {
-	root := t.TempDir()
-	stdout := bytes.Buffer{}
-	stderr := bytes.Buffer{}
-
-	if code := runCLI(context.Background(), "agent-plan", []string{"init", "--dir", root}, strings.NewReader(""), &stdout, &stderr); code != 0 {
-		t.Fatalf("init code = %d stderr=%s", code, stderr.String())
-	}
-	stdout.Reset()
-	stderr.Reset()
-
-	if code := runCLI(context.Background(), "agent-plan", []string{"add", "--dir", root, "Legacy task", "--description", "legacy description", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
-		t.Fatalf("add with description code = %d stderr=%s", code, stderr.String())
-	}
-	var task TaskRecord
-	if err := json.Unmarshal(stdout.Bytes(), &task); err != nil {
-		t.Fatalf("Unmarshal(add with description) error = %v", err)
-	}
-	if task.Description != "legacy description" {
-		t.Fatalf("task = %#v", task)
+	for _, args := range [][]string{
+		{"add", "--dir", root, "Legacy task"},
+		{"claim", "--dir", root, "001-task"},
+		{"done", "--dir", root, "001-task"},
+		{"block", "--dir", root, "001-task", "--reason", "blocked"},
+		{"list-tasks", "--dir", root},
+		{"plan", "show", "--dir", root},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := runCLI(context.Background(), "agent-plan", args, strings.NewReader(""), &stdout, &stderr); code != 1 {
+			t.Fatalf("%v code = %d stderr=%s", args, code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "unknown command") && !strings.Contains(stderr.String(), "usage: agent-plan plan show") {
+			t.Fatalf("%v stderr = %q", args, stderr.String())
+		}
 	}
 }
 
@@ -237,17 +188,14 @@ func TestCLIUpdateTaskOrderReturnsUpdatedTask(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 
-	if code := runCLI(context.Background(), "agent-plan", []string{"create", "--dir", root, "Order Plan", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+	if code := runCLI(context.Background(), "agent-plan", []string{"create", "--dir", root, "Order Plan"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("create code = %d stderr=%s", code, stderr.String())
 	}
-	var plan Plan
-	if err := json.Unmarshal(stdout.Bytes(), &plan); err != nil {
-		t.Fatalf("Unmarshal(create) error = %v", err)
-	}
+	planID := strings.TrimSpace(strings.TrimPrefix(strings.Split(strings.TrimSpace(stdout.String()), "\n")[0], "Created plan: "))
 	stdout.Reset()
 	stderr.Reset()
 
-	if code := runCLI(context.Background(), "agent-plan", []string{"add-task", "--dir", root, plan.ID, "A", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+	if code := runCLI(context.Background(), "agent-plan", []string{"add-task", "--dir", root, planID, "A", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("add-task A code = %d stderr=%s", code, stderr.String())
 	}
 	var taskA TaskRecord
@@ -257,13 +205,13 @@ func TestCLIUpdateTaskOrderReturnsUpdatedTask(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 
-	if code := runCLI(context.Background(), "agent-plan", []string{"add-task", "--dir", root, plan.ID, "B", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+	if code := runCLI(context.Background(), "agent-plan", []string{"add-task", "--dir", root, planID, "B", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("add-task B code = %d stderr=%s", code, stderr.String())
 	}
 	stdout.Reset()
 	stderr.Reset()
 
-	if code := runCLI(context.Background(), "agent-plan", []string{"update-task", "--dir", root, plan.ID, taskA.ID, "--order", "50", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+	if code := runCLI(context.Background(), "agent-plan", []string{"update-task", "--dir", root, planID, taskA.ID, "--order", "50", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("update-task order code = %d stderr=%s", code, stderr.String())
 	}
 	var updated TaskRecord
@@ -311,7 +259,7 @@ func TestCLIConfirmDeleteAndErrorPaths(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := runCLI(context.Background(), "agent-plan", []string{"update-task", "--dir", root, defaultPlanID, "missing", "--status", "wat"}, strings.NewReader(""), &stdout, &stderr); code != 1 {
+	if code := runCLI(context.Background(), "agent-plan", []string{"update-task", "--dir", root, planID, "missing", "--status", "wat"}, strings.NewReader(""), &stdout, &stderr); code != 1 {
 		t.Fatalf("update-task invalid code = %d stderr=%s", code, stderr.String())
 	}
 }

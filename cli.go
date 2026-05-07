@@ -60,22 +60,6 @@ func runCLI(ctx context.Context, program string, args []string, stdin io.Reader,
 		return runBindCurrent(program, stdout, stderr, args[1:])
 	case "install":
 		return runInstall(program, stdout, stderr, args[1:])
-	case "list-tasks":
-		return runListTasks(program, stdout, stderr, args[1:])
-	case "add":
-		return runAdd(program, stdout, stderr, args[1:])
-	case "claim":
-		return runClaim(program, stdout, stderr, args[1:])
-	case "done":
-		return runDone(program, stdout, stderr, args[1:])
-	case "block":
-		return runBlock(program, stdout, stderr, args[1:])
-	case "plan":
-		if len(args) > 1 && args[1] == "show" {
-			return runPlanShow(program, stdout, stderr, args[2:])
-		}
-		fmt.Fprintf(stderr, "usage: %s plan show [--dir PATH] [--json]\n", program)
-		return 1
 	case "mcp":
 		if len(args) > 1 {
 			fmt.Fprintf(stderr, "usage: %s mcp\n", program)
@@ -575,17 +559,16 @@ func runReady(program string, stdout, stderr io.Writer, args []string) int {
 	})); err != nil {
 		return 1
 	}
+	if fs.NArg() != 1 {
+		fmt.Fprintf(stderr, "usage: %s ready [--dir PATH] [--json] <plan>\n", program)
+		return 1
+	}
 	store, err := Open(*dir)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	planID, err := resolvePlanIDForTaskCommand(store, fs.Args())
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	plan, err := store.GetPlan(planID)
+	plan, err := resolvePlan(store, fs.Arg(0))
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -629,17 +612,16 @@ func runNext(program string, stdout, stderr io.Writer, args []string) int {
 	})); err != nil {
 		return 1
 	}
+	if fs.NArg() != 1 {
+		fmt.Fprintf(stderr, "usage: %s next [--dir PATH] [--session ID] [--json] <plan>\n", program)
+		return 1
+	}
 	store, err := Open(*dir)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	planID, err := resolvePlanIDForTaskCommand(store, fs.Args())
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	plan, err := store.GetPlan(planID)
+	plan, err := resolvePlan(store, fs.Arg(0))
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -673,17 +655,21 @@ func runClaimNext(program string, stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintf(stderr, "usage: %s claim-next [--dir PATH] --session ID [--json] <plan>\n", program)
 		return 1
 	}
+	if fs.NArg() != 1 {
+		fmt.Fprintf(stderr, "usage: %s claim-next [--dir PATH] --session ID [--json] <plan>\n", program)
+		return 1
+	}
 	store, err := Open(*dir)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	planID, err := resolvePlanIDForTaskCommand(store, fs.Args())
+	plan, err := resolvePlan(store, fs.Arg(0))
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	task, err := store.ClaimNext(planID, *sessionID)
+	task, err := store.ClaimNext(plan.ID, *sessionID)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -692,7 +678,7 @@ func runClaimNext(program string, stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stderr, "No ready tasks found.")
 		return 1
 	}
-	plan, err := store.GetPlan(planID)
+	plan, err = store.GetPlan(plan.ID)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -830,251 +816,6 @@ func runInstall(program string, stdout, stderr io.Writer, args []string) int {
 	return 0
 }
 
-func runListTasks(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("list-tasks", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dir := fs.String("dir", "", "workspace root")
-	statusRaw := fs.String("status", "", "status filter")
-	jsonOut := fs.Bool("json", false, "emit json")
-	if err := fs.Parse(reorderFlags(args, map[string]bool{
-		"--dir":         true,
-		"--description": true,
-		"--depends-on":  true,
-		"--order":       true,
-		"--json":        false,
-	})); err != nil {
-		return 1
-	}
-	store, err := Open(*dir)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	planID, err := resolvePlanIDForTaskCommand(store, fs.Args())
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	plan, err := store.GetPlan(planID)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	var filter *Status
-	if strings.TrimSpace(*statusRaw) != "" {
-		value := Status(strings.TrimSpace(*statusRaw))
-		if !isValidStatus(value) {
-			fmt.Fprintf(stderr, "invalid status: %s\n", value)
-			return 1
-		}
-		filter = &value
-	}
-	summaries := make([]TaskSummary, 0)
-	for _, task := range plan.IterTasksInDisplayOrder() {
-		if filter != nil && task.Status != *filter {
-			continue
-		}
-		summaries = append(summaries, summaryFromRecord(task))
-	}
-	if *jsonOut {
-		return writeJSON(stdout, summaries, stderr)
-	}
-	for _, task := range summaries {
-		fmt.Fprintln(stdout, formatTaskSummary(task))
-	}
-	return 0
-}
-
-func runAdd(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("add", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dir := fs.String("dir", "", "workspace root")
-	description := fs.String("description", "", "task description")
-	dependsOn := fs.String("depends-on", "", "comma-separated dependency ids")
-	order := fs.Int("order", -1, "display order")
-	jsonOut := fs.Bool("json", false, "emit json")
-	if err := fs.Parse(reorderFlags(args, map[string]bool{
-		"--dir":         true,
-		"--description": true,
-		"--depends-on":  true,
-		"--order":       true,
-		"--json":        false,
-	})); err != nil {
-		return 1
-	}
-	if fs.NArg() != 1 {
-		fmt.Fprintf(stderr, "usage: %s add [--dir PATH] [--description TEXT] [--depends-on a,b] [--order N] [--json] <title>\n", program)
-		return 1
-	}
-	store, err := OpenOrInit(*dir)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	var orderPtr *int
-	if *order >= 0 {
-		value := *order
-		orderPtr = &value
-	}
-	record, err := store.Add(fs.Arg(0), AddOptions{
-		Description: *description,
-		DependsOn:   splitCSV(*dependsOn),
-		Order:       orderPtr,
-	})
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	if *jsonOut {
-		return writeJSON(stdout, record, stderr)
-	}
-	fmt.Fprintf(stdout, "added %s\n", record.ID)
-	return 0
-}
-
-func runClaim(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("claim", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dir := fs.String("dir", "", "workspace root")
-	by := fs.String("by", "", "actor id")
-	jsonOut := fs.Bool("json", false, "emit json")
-	if err := fs.Parse(reorderFlags(args, map[string]bool{
-		"--dir":    true,
-		"--by":     true,
-		"--output": true,
-		"--json":   false,
-	})); err != nil {
-		return 1
-	}
-	if fs.NArg() != 1 {
-		fmt.Fprintf(stderr, "usage: %s claim [--dir PATH] [--by ACTOR] [--json] <id>\n", program)
-		return 1
-	}
-	store, err := Open(*dir)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	record, err := store.Claim(fs.Arg(0), *by)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	if *jsonOut {
-		return writeJSON(stdout, record, stderr)
-	}
-	fmt.Fprintf(stdout, "claimed %s\n", record.ID)
-	return 0
-}
-
-func runDone(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("done", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dir := fs.String("dir", "", "workspace root")
-	by := fs.String("by", "", "actor id")
-	output := fs.String("output", "", "completion output")
-	jsonOut := fs.Bool("json", false, "emit json")
-	if err := fs.Parse(reorderFlags(args, map[string]bool{
-		"--dir":    true,
-		"--by":     true,
-		"--output": true,
-		"--json":   false,
-	})); err != nil {
-		return 1
-	}
-	if fs.NArg() != 1 {
-		fmt.Fprintf(stderr, "usage: %s done [--dir PATH] [--by ACTOR] [--output TEXT] [--json] <id>\n", program)
-		return 1
-	}
-	store, err := Open(*dir)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	record, err := store.Done(fs.Arg(0), *output, *by)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	if *jsonOut {
-		return writeJSON(stdout, record, stderr)
-	}
-	fmt.Fprintf(stdout, "completed %s\n", record.ID)
-	return 0
-}
-
-func runBlock(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("block", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dir := fs.String("dir", "", "workspace root")
-	by := fs.String("by", "", "actor id")
-	reason := fs.String("reason", "", "block reason")
-	jsonOut := fs.Bool("json", false, "emit json")
-	if err := fs.Parse(reorderFlags(args, map[string]bool{
-		"--dir":    true,
-		"--by":     true,
-		"--reason": true,
-		"--json":   false,
-	})); err != nil {
-		return 1
-	}
-	if fs.NArg() != 1 || strings.TrimSpace(*reason) == "" {
-		fmt.Fprintf(stderr, "usage: %s block [--dir PATH] [--by ACTOR] --reason TEXT [--json] <id>\n", program)
-		return 1
-	}
-	store, err := Open(*dir)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	record, err := store.Block(fs.Arg(0), *reason, *by)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	if *jsonOut {
-		return writeJSON(stdout, record, stderr)
-	}
-	fmt.Fprintf(stdout, "blocked %s\n", record.ID)
-	return 0
-}
-
-func runPlanShow(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("plan show", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dir := fs.String("dir", "", "workspace root")
-	jsonOut := fs.Bool("json", false, "emit json")
-	if err := fs.Parse(args); err != nil {
-		return 1
-	}
-	store, err := Open(*dir)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	overview, err := store.Overview()
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	if *jsonOut {
-		return writeJSON(stdout, overview, stderr)
-	}
-	fmt.Fprintln(stdout, "Plan")
-	fmt.Fprintf(stdout, "  root: %s\n", store.Root)
-	fmt.Fprintf(stdout, "  tasks: %d\n", len(overview.Plan.Tasks))
-	if len(overview.Counts) > 0 {
-		fmt.Fprintf(stdout, "  counts: %v\n", overview.Counts)
-	}
-	if overview.Next != nil {
-		fmt.Fprintf(stdout, "  next: %s\n", overview.Next.ID)
-	}
-	for _, task := range overview.Plan.IterTasksInDisplayOrder() {
-		fmt.Fprintln(stdout, formatTaskSummary(summaryFromRecord(task)))
-	}
-	return 0
-}
-
 func printUsage(w io.Writer, program string) {
 	fmt.Fprintf(w, `Usage:
   %s init [--dir PATH] [--json]
@@ -1086,30 +827,14 @@ func printUsage(w io.Writer, program string) {
   %s add-task [--dir PATH] [--description TEXT] [--parent TASK] [--order N] [--depends-on TASK] [--json] <plan> <name>
   %s update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--assigned-session ID] [--clear-assigned-session] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>
   %s delete-task [--dir PATH] [--json] <plan> <task>
-  %s ready [--dir PATH] [--json] [plan]
-  %s next [--dir PATH] [--session ID] [--json] [plan]
-  %s claim-next [--dir PATH] --session ID [--json] [plan]
+  %s ready [--dir PATH] [--json] <plan>
+  %s next [--dir PATH] [--session ID] [--json] <plan>
+  %s claim-next [--dir PATH] --session ID [--json] <plan>
   %s bind-session [--dir PATH] --session ID [--json] <plan>
   %s bind-current [--dir PATH] [--json] <plan>
-  %s install [--global] [--json] <AGENTS.md|CLAUDE.md|skill>
-
-Legacy default-plan aliases:
-  %s add [--dir PATH] [--description TEXT] [--depends-on a,b] [--order N] [--json] <title>
-  %s claim [--dir PATH] [--by ACTOR] [--json] <id>
-  %s done [--dir PATH] [--by ACTOR] [--output TEXT] [--json] <id>
-  %s block [--dir PATH] [--by ACTOR] --reason TEXT [--json] <id>
-  %s list-tasks [--dir PATH] [--status STATUS] [--json] [plan]
-  %s plan show [--dir PATH] [--json]
+  %s install [--dir PATH] [--global] [--json] <AGENTS.md|CLAUDE.md|skill>
   %s mcp [--dir PATH]
-`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
-}
-
-func splitCSV(value string) []string {
-	if strings.TrimSpace(value) == "" {
-		return nil
-	}
-	parts := strings.Split(value, ",")
-	return normalizeIDs(parts)
+`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
 }
 
 func writeJSON(w io.Writer, value any, stderr io.Writer) int {
@@ -1321,21 +1046,6 @@ func resolveDependencyIDs(plan *Plan, refs []string) ([]string, error) {
 		ids = append(ids, task.ID)
 	}
 	return plan.ValidateDependencyIDs(ids, "")
-}
-
-func resolvePlanIDForTaskCommand(store *Store, args []string) (string, error) {
-	if len(args) > 0 {
-		plan, err := resolvePlan(store, args[0])
-		if err != nil {
-			return "", err
-		}
-		return plan.ID, nil
-	}
-	workspace, err := store.loadWorkspace()
-	if err != nil {
-		return "", err
-	}
-	return workspace.DefaultPlanID, nil
 }
 
 func taskPayload(plan *Plan, task TaskRecord) map[string]any {

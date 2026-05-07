@@ -3,6 +3,7 @@ package agentplan
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,7 @@ func TestStoreMultiPlanWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPlans() error = %v", err)
 	}
-	if len(plans) != 1 || plans[0].ID != defaultPlanID {
+	if len(plans) != 0 {
 		t.Fatalf("plans = %#v", plans)
 	}
 
@@ -125,12 +126,12 @@ func TestStoreMultiPlanWorkflow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPlans(after delete) error = %v", err)
 	}
-	if len(plans) != 1 || plans[0].ID != defaultPlanID {
+	if len(plans) != 0 {
 		t.Fatalf("plans after delete = %#v", plans)
 	}
 }
 
-func TestLegacyStoreMigration(t *testing.T) {
+func TestLegacyStoreIsNotMigrated(t *testing.T) {
 	root := t.TempDir()
 	metaDir := filepath.Join(root, metaDirName)
 	if err := os.MkdirAll(filepath.Join(metaDir, tasksDirName), 0o755); err != nil {
@@ -198,29 +199,8 @@ func TestLegacyStoreMigration(t *testing.T) {
 		t.Fatalf("WriteFile(manifest) error = %v", err)
 	}
 
-	store, err := Open(root)
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	workspace, err := store.loadWorkspace()
-	if err != nil {
-		t.Fatalf("loadWorkspace() error = %v", err)
-	}
-	if workspace.DefaultPlanID != defaultPlanID {
-		t.Fatalf("workspace = %#v", workspace)
-	}
-	plan, err := store.GetPlan(defaultPlanID)
-	if err != nil {
-		t.Fatalf("GetPlan(default) error = %v", err)
-	}
-	if len(plan.Tasks) != 2 {
-		t.Fatalf("plan.Tasks = %#v", plan.Tasks)
-	}
-	if _, err := os.Stat(filepath.Join(metaDir, plansDirName, defaultPlanID, manifestFileName)); err != nil {
-		t.Fatalf("migrated manifest missing: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(metaDir, tasksDirName)); !os.IsNotExist(err) {
-		t.Fatalf("legacy tasks dir should be removed, err=%v", err)
+	if _, err := Open(root); !errors.Is(err, ErrPlanNotInitialized) {
+		t.Fatalf("Open() error = %v, want %v", err, ErrPlanNotInitialized)
 	}
 }
 
