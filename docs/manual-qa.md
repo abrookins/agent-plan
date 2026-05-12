@@ -269,6 +269,22 @@ Accepted environment variables:
 - `CODEX_THREAD_ID`
 - `AGENT_SESSION_ID`
 
+Prefer `bind-session --session <id>` in agent workflows that can pass an
+explicit session ID.
+
+### QA-CLI-11A: `show` returns the full current plan state
+
+Steps:
+
+1. Run `show <plan-id> --json`.
+2. Run `show <plan-id>` without `--json`.
+
+Expected results:
+
+- the JSON payload includes the full plan object and all tasks
+- the text output includes the plan metadata plus task state
+- `show` succeeds with the same plan references accepted by `get`
+
 ### QA-CLI-12: removed implicit-plan commands fail explicitly
 
 Steps:
@@ -339,6 +355,21 @@ Expected results:
 
 - commands exit non-zero
 - usage text or error text clearly identifies what is missing or invalid
+
+### QA-CLI-16: environment fallbacks stay explicit
+
+Steps:
+
+1. Export `AGENT_PLAN_DIR=<workspace-root>`.
+2. Run `list --json` without `--dir`.
+3. Export `AGENT_PLAN_NONINTERACTIVE=1`.
+4. Run `delete <plan-id> --json` without `--yes`.
+
+Expected results:
+
+- `list` succeeds against the workspace from `AGENT_PLAN_DIR`
+- `delete` succeeds without prompting when `AGENT_PLAN_NONINTERACTIVE=1`
+- explicit `--dir` remains preferred when the caller can provide it
 
 ## JSON Output QA
 
@@ -428,6 +459,7 @@ Exercise each tool with valid inputs:
 - `plan_create`
 - `plan_list`
 - `plan_get`
+- `plan_show`
 - `plan_update`
 - `plan_delete`
 - `plan_add_task`
@@ -454,7 +486,6 @@ Exercise:
 - `plan_claim`
 - `plan_done`
 - `plan_block`
-- `plan_show`
 
 Expected results:
 

@@ -33,7 +33,7 @@ func (s *MCPServer) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 	rootSchema := map[string]any{
 		"type":        "string",
-		"description": "Workspace root. Defaults to the server working directory and searches upward for .agent-plan.",
+		"description": "Workspace root. Defaults to the AGENT_PLAN_DIR env var when set, otherwise the server working directory and searches upward for .agent-plan.",
 	}
 	planSchema := map[string]any{"type": "string"}
 	taskSchema := map[string]any{"type": "string"}
@@ -60,6 +60,11 @@ func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 		{
 			Name:        "plan_get",
 			Description: "Load a plan and its tasks.",
+			InputSchema: schema(rootSchema, map[string]any{"plan": planSchema}, "plan"),
+		},
+		{
+			Name:        "plan_show",
+			Description: "Show the current plan state and all tasks.",
 			InputSchema: schema(rootSchema, map[string]any{"plan": planSchema}, "plan"),
 		},
 		{
@@ -188,6 +193,12 @@ func (s *MCPServer) CallTool(_ context.Context, name string, args map[string]any
 			return toolErr(err)
 		}
 		return toolOK("plan loaded", plan)
+	case "plan_show":
+		plan, err := resolvePlanFromArgs(store, args)
+		if err != nil {
+			return toolErr(err)
+		}
+		return toolOK("plan state loaded", plan)
 	case "plan_update":
 		plan, err := resolvePlanFromArgs(store, args)
 		if err != nil {

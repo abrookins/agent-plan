@@ -141,6 +141,19 @@ func TestCLIPlanCommandsAndFlagReordering(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 
+	if code := runCLI(context.Background(), "agent-plan", []string{"show", "--dir", root, created.ID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("show code = %d stderr=%s", code, stderr.String())
+	}
+	var shown Plan
+	if err := json.Unmarshal(stdout.Bytes(), &shown); err != nil {
+		t.Fatalf("Unmarshal(show) error = %v", err)
+	}
+	if shown.ID != created.ID || len(shown.Tasks) != 2 {
+		t.Fatalf("show = %#v", shown)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
 	if code := runCLI(context.Background(), "agent-plan", []string{"delete", "--dir", root, created.ID, "--yes", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("delete code = %d stderr=%s", code, stderr.String())
 	}
@@ -253,6 +266,24 @@ func TestCLIConfirmDeleteAndErrorPaths(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
+	t.Setenv("AGENT_PLAN_NONINTERACTIVE", "1")
+	if code := runCLI(context.Background(), "agent-plan", []string{"delete", "--dir", root, planID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("delete noninteractive code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"deleted": true`) {
+		t.Fatalf("delete noninteractive stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCLI(context.Background(), "agent-plan", []string{"create", "--dir", root, "Delete Me Again"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("create second plan code = %d stderr=%s", code, stderr.String())
+	}
+	parts = strings.Split(strings.TrimSpace(stdout.String()), "\n")
+	planID = strings.TrimSpace(strings.TrimPrefix(parts[0], "Created plan: "))
+
+	stdout.Reset()
+	stderr.Reset()
 	if code := runCLI(context.Background(), "agent-plan", []string{"claim-next", "--dir", root, planID, "--session", "sess"}, strings.NewReader(""), &stdout, &stderr); code != 1 {
 		t.Fatalf("claim-next empty code = %d stderr=%s", code, stderr.String())
 	}
@@ -315,6 +346,42 @@ func TestInstallSupportsDirFlag(t *testing.T) {
 	}
 }
 
+func TestCLISupportsShowAndEnvDirFallback(t *testing.T) {
+	root := t.TempDir()
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+
+	t.Setenv("AGENT_PLAN_DIR", root)
+	if code := runCLI(context.Background(), "agent-plan", []string{"init", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("init env dir code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"create", "Case Plan", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("create env dir code = %d stderr=%s", code, stderr.String())
+	}
+	var created Plan
+	if err := json.Unmarshal(stdout.Bytes(), &created); err != nil {
+		t.Fatalf("Unmarshal(create env dir) error = %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"show", created.Name, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("show env dir code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"get", strings.ToLower(created.Name)}, strings.NewReader(""), &stdout, &stderr); code != 1 {
+		t.Fatalf("get case mismatch code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "expected plan ID or exact plan name") {
+		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
 func TestMCPCommandRejectsExtraArgs(t *testing.T) {
 	stdout := bytes.Buffer{}
 	stderr := bytes.Buffer{}
@@ -324,5 +391,35 @@ func TestMCPCommandRejectsExtraArgs(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "usage: agent-plan mcp") {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+}
+
+func TestCLIHelpTextIsMeaningful(t *testing.T) {
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"help"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("help code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "AGENT_PLAN_DIR") || !strings.Contains(stdout.String(), "show") {
+		t.Fatalf("help stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCLI(context.Background(), "agent-plan", []string{"bind-current", "--help"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("bind-current --help code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "AGENT_DASHBOARD_SESSION_ID") || !strings.Contains(stdout.String(), "bind-session instead") {
+		t.Fatalf("bind-current help stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCLI(context.Background(), "agent-plan", []string{"help", "update-task"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("help update-task code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "not_started, in_progress, blocked, complete, cancelled") {
+		t.Fatalf("update-task help stdout = %q", stdout.String())
 	}
 }

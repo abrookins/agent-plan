@@ -10,6 +10,7 @@ The current Go implementation supports:
 - multiple named plans per workspace
 - ordered tasks with hierarchy and dependencies
 - session-aware task selection and claiming
+- explicit whole-plan state loading with `show`
 - JSON output for agent-facing commands
 
 ## Install
@@ -102,10 +103,12 @@ agent-plan init
 agent-plan create "Go parity" --description "Track feature work"
 agent-plan list
 agent-plan get <plan-id> --json
+agent-plan show <plan-id> --json
 agent-plan update <plan-id> --spec-path docs/parity-design.md
 agent-plan delete <plan-id> --yes
 agent-plan add-task <plan-id> "Freeze parity matrix" --description "Capture the target surface"
 agent-plan update-task <plan-id> <task-id> --status in_progress
+agent-plan update-task <plan-id> <task-id> --status complete
 agent-plan delete-task <plan-id> <task-id>
 agent-plan ready <plan-id> --json
 agent-plan next <plan-id> --session <session-id> --json
@@ -116,8 +119,50 @@ agent-plan install AGENTS.md
 agent-plan mcp
 ```
 
-All commands accept `--dir <workspace-root>`. Agent-facing commands support
-`--json`. The `mcp` command does not because MCP defines its own wire format.
+`show` is the explicit whole-plan snapshot command for agents that want the
+current plan plus all tasks in one call. `get` returns the same plan payload and
+remains available for parity with the existing surface.
+
+All commands accept `--dir <workspace-root>`. When `--dir` is omitted, the CLI
+falls back to `AGENT_PLAN_DIR` before using the current working directory.
+Agent-facing commands support `--json`. The `mcp` command does not because MCP
+defines its own wire format.
+
+`delete` prompts for confirmation unless `--yes` is passed or
+`AGENT_PLAN_NONINTERACTIVE=1` is set.
+
+Use task IDs when scripting agent workflows. Plan and task names are supported
+only as exact matches; there is no fuzzy matching.
+
+`bind-current` resolves the session from the first populated env var in this
+order:
+
+- `AGENT_DASHBOARD_SESSION_ID`
+- `CODEX_THREAD_ID`
+- `AGENT_SESSION_ID`
+
+Prefer `bind-session --session <id>` for agents that can pass an explicit
+session ID. Likewise, prefer `next --session <id>` when session affinity
+matters; plain `next` does not infer a bound session.
+
+## Task Status
+
+The CLI accepts these task statuses:
+
+- `not_started`
+- `in_progress`
+- `blocked`
+- `complete`
+- `cancelled`
+
+Mark finished work with `update-task --status complete`. Completed task records
+move from `tasks/*.md` to `history/*.done`.
+
+## Guidance Install
+
+`install [AGENTS.md|CLAUDE.md|skill]` is onboarding/scaffolding, not plan
+lifecycle state. It is intended for a human or setup step that wants managed
+guidance files in a workspace or provider home.
 
 ## MCP
 
@@ -127,6 +172,7 @@ The stdio server exposes the full plan workflow:
 - `plan_create`
 - `plan_list`
 - `plan_get`
+- `plan_show`
 - `plan_update`
 - `plan_delete`
 - `plan_add_task`

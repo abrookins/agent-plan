@@ -25,34 +25,41 @@ Do not use it for a one-off task unless the user wants explicit tracking.
 command -v agent-plan
 agent-plan init
 agent-plan list --json
+agent-plan help show
 ```
 
 - Use `agent-plan init` only when the workspace is not already initialized.
 - Add `--dir <workspace-root>` when you are outside the target workspace.
+- When `--dir` is omitted, the CLI falls back to `AGENT_PLAN_DIR` before using
+  the current working directory.
 
 ### 2. Load the relevant plan
 
 ```bash
 agent-plan list --json
 agent-plan get <plan-id> --json
+agent-plan show <plan-id> --json
 agent-plan ready <plan-id> --json
 ```
 
-- Prefer `get --json` for a cold start on a known plan.
+- Prefer `show --json` or `get --json` for a cold start on a known plan.
 - Prefer `ready --json` when you need actionable tasks only.
 
 ### 3. Bind or claim session-specific work
 
 ```bash
-agent-plan bind-current <plan-id> --json
 agent-plan bind-session <plan-id> --session <session-id> --json
+agent-plan bind-current <plan-id> --json
 agent-plan next <plan-id> --session <session-id> --json
 agent-plan claim-next <plan-id> --session <session-id> --json
 ```
 
-- Use `bind-current` when the current runtime already exposes a session ID in
-  environment variables.
+- Prefer `bind-session` when you can pass an explicit session ID.
+- Use `bind-current` only when the runtime already exposes one of
+  `AGENT_DASHBOARD_SESSION_ID`, `CODEX_THREAD_ID`, or `AGENT_SESSION_ID`.
 - Use `claim-next` when you need exclusive ownership before editing files.
+- Use `next --session <session-id>` when session affinity matters; plain
+  `next` does not infer a bound session.
 
 ### 4. Update the plan as work changes
 
@@ -65,8 +72,11 @@ agent-plan delete-task <plan-id> <task-id> --json
 ```
 
 - Use `add-task` for newly discovered work in the same plan.
+- Use `--status complete` when work is done so the durable record moves into
+  `history/*.done`.
 - Use `--depends-on` for blocking relationships.
 - Use `--parent` only when you want hierarchy or subtasks.
+- Prefer exact task IDs in agent workflows. Name resolution is exact, not fuzzy.
 
 ## MCP Surface
 
@@ -77,6 +87,7 @@ Primary MCP tools:
 - `plan_create`
 - `plan_list`
 - `plan_get`
+- `plan_show`
 - `plan_update`
 - `plan_delete`
 - `plan_add_task`
@@ -94,3 +105,5 @@ Primary MCP tools:
 - Treat `tasks/*.md` and `history/*.done` as durable records.
 - Treat `tasks/*.claim`, `manifest.lock`, and `sessions/*.json` as coordination state.
 - Prefer the CLI or MCP tools over editing `.agent-plan/` files by hand.
+- Use `agent-plan help <command>` or `agent-plan <command> --help` when you
+  need command-specific flag or environment details.

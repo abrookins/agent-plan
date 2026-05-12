@@ -123,6 +123,21 @@ func TestMCPPlanLifecycle(t *testing.T) {
 		t.Fatalf("plan = %#v", plan)
 	}
 
+	result = server.CallTool(context.Background(), "plan_show", map[string]any{"plan": plan.ID})
+	if result.IsError {
+		t.Fatalf("plan_show result = %#v", result)
+	}
+	raw, err = json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatalf("Marshal(plan_show) error = %v", err)
+	}
+	if err := json.Unmarshal(raw, &plan); err != nil {
+		t.Fatalf("Unmarshal(plan_show) error = %v", err)
+	}
+	if len(plan.Tasks) != 2 {
+		t.Fatalf("plan_show plan = %#v", plan)
+	}
+
 	result = server.CallTool(context.Background(), "plan_delete", map[string]any{"plan": plan.ID})
 	if result.IsError {
 		t.Fatalf("plan_delete result = %#v", result)

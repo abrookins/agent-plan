@@ -58,6 +58,12 @@ var (
 	ErrTaskAlreadyClaimed = errors.New("task is already claimed")
 )
 
+var currentSessionEnvKeys = []string{
+	"AGENT_DASHBOARD_SESSION_ID",
+	"CODEX_THREAD_ID",
+	"AGENT_SESSION_ID",
+}
+
 type exclusiveFile interface {
 	Write([]byte) (int, error)
 	Sync() error
@@ -474,7 +480,7 @@ func (s *Store) BindSession(planID, sessionID string) (*SessionBinding, error) {
 func (s *Store) BindCurrent(planID string) (*SessionBinding, error) {
 	sessionID := resolveCurrentSessionID()
 	if sessionID == "" {
-		return nil, fmt.Errorf("no current session env was found")
+		return nil, fmt.Errorf("no current session env was found; set one of %s or use bind-session --session <id>", strings.Join(currentSessionEnvKeys, ", "))
 	}
 	return s.BindSession(planID, sessionID)
 }
@@ -1022,6 +1028,11 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 
 func normalizeRoot(root string) (string, error) {
 	if strings.TrimSpace(root) == "" {
+		if envRoot := strings.TrimSpace(os.Getenv("AGENT_PLAN_DIR")); envRoot != "" {
+			root = envRoot
+		}
+	}
+	if strings.TrimSpace(root) == "" {
 		cwd, err := getwdFunc()
 		if err != nil {
 			return "", err
@@ -1165,11 +1176,7 @@ func randomID() (string, error) {
 }
 
 func resolveCurrentSessionID() string {
-	for _, key := range []string{
-		"AGENT_DASHBOARD_SESSION_ID",
-		"CODEX_THREAD_ID",
-		"AGENT_SESSION_ID",
-	} {
+	for _, key := range currentSessionEnvKeys {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value
 		}

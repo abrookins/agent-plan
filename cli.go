@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 )
@@ -25,9 +26,24 @@ func runCLI(ctx context.Context, program string, args []string, stdin io.Reader,
 		printUsage(stderr, program)
 		return 1
 	}
+	if len(args) > 1 && isHelpArg(args[1]) {
+		if printCommandHelp(stdout, program, args[0]) {
+			return 0
+		}
+		fmt.Fprintf(stderr, "unknown command: %s\n", args[0])
+		printUsage(stderr, program)
+		return 1
+	}
 
 	switch args[0] {
 	case "help", "-h", "--help":
+		if len(args) > 1 {
+			if printCommandHelp(stdout, program, args[1]) {
+				return 0
+			}
+			fmt.Fprintf(stderr, "unknown command: %s\n", args[1])
+			return 1
+		}
 		printUsage(stdout, program)
 		return 0
 	case "init":
@@ -38,6 +54,8 @@ func runCLI(ctx context.Context, program string, args []string, stdin io.Reader,
 		return runListPlans(stdout, stderr, args[1:])
 	case "get":
 		return runGet(program, stdout, stderr, args[1:])
+	case "show":
+		return runShow(program, stdout, stderr, args[1:])
 	case "update":
 		return runUpdatePlan(program, stdout, stderr, args[1:])
 	case "delete":
@@ -74,14 +92,16 @@ func runCLI(ctx context.Context, program string, args []string, stdin io.Reader,
 }
 
 func runInit(_ string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("init", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("init", "agent-plan", stderr)
 	dir := fs.String("dir", "", "workspace root")
 	jsonOut := fs.Bool("json", false, "emit json")
 	if err := fs.Parse(reorderFlags(args, map[string]bool{
 		"--dir":  true,
 		"--json": false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	store, err := Init(*dir)
@@ -100,8 +120,7 @@ func runInit(_ string, stdout, stderr io.Writer, args []string) int {
 }
 
 func runCreate(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("create", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("create", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	description := fs.String("description", "", "plan description")
 	specPath := fs.String("spec-path", "", "related spec path")
@@ -112,6 +131,9 @@ func runCreate(program string, stdout, stderr io.Writer, args []string) int {
 		"--spec-path":   true,
 		"--json":        false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if fs.NArg() != 1 {
@@ -136,14 +158,16 @@ func runCreate(program string, stdout, stderr io.Writer, args []string) int {
 }
 
 func runListPlans(stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("list", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("list", "agent-plan", stderr)
 	dir := fs.String("dir", "", "workspace root")
 	jsonOut := fs.Bool("json", false, "emit json")
 	if err := fs.Parse(reorderFlags(args, map[string]bool{
 		"--dir":  true,
 		"--json": false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	store, err := Open(*dir)
@@ -170,8 +194,7 @@ func runListPlans(stdout, stderr io.Writer, args []string) int {
 }
 
 func runGet(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("get", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("get", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	jsonOut := fs.Bool("json", false, "emit json")
 	verbose := fs.Bool("verbose", false, "show additional details")
@@ -180,6 +203,9 @@ func runGet(program string, stdout, stderr io.Writer, args []string) int {
 		"--json":    false,
 		"--verbose": false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if fs.NArg() != 1 {
@@ -203,9 +229,48 @@ func runGet(program string, stdout, stderr io.Writer, args []string) int {
 	return 0
 }
 
+func runShow(program string, stdout, stderr io.Writer, args []string) int {
+	fs := newCommandFlagSet("show", program, stderr)
+	dir := fs.String("dir", "", "workspace root")
+	jsonOut := fs.Bool("json", false, "emit json")
+	verbose := fs.Bool("verbose", false, "show additional details")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{
+		"--dir":     true,
+		"--json":    false,
+		"--verbose": false,
+	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintf(stderr, "usage: %s show [--dir PATH] [--json] [--verbose] <plan>\n", program)
+		return 1
+	}
+	store, err := Open(*dir)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	plan, err := resolvePlan(store, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if *jsonOut {
+		return writeJSON(stdout, plan, stderr)
+	}
+	showVerbose := true
+	if isFlagPassed(args, "--verbose") {
+		showVerbose = *verbose
+	}
+	fmt.Fprintln(stdout, formatPlan(*plan, showVerbose))
+	return 0
+}
+
 func runUpdatePlan(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("update", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("update", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	name := fs.String("name", "", "new plan name")
 	description := fs.String("description", "", "new plan description")
@@ -223,6 +288,9 @@ func runUpdatePlan(program string, stdout, stderr io.Writer, args []string) int 
 		"--clear-sessions": false,
 		"--json":           false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if fs.NArg() != 1 {
@@ -272,8 +340,7 @@ func runUpdatePlan(program string, stdout, stderr io.Writer, args []string) int 
 }
 
 func runDeletePlan(program string, stdin io.Reader, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("delete", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("delete", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	yes := fs.Bool("yes", false, "skip confirmation")
 	jsonOut := fs.Bool("json", false, "emit json")
@@ -282,6 +349,9 @@ func runDeletePlan(program string, stdin io.Reader, stdout, stderr io.Writer, ar
 		"--yes":  false,
 		"--json": false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if fs.NArg() != 1 {
@@ -298,7 +368,7 @@ func runDeletePlan(program string, stdin io.Reader, stdout, stderr io.Writer, ar
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	if !*yes {
+	if !*yes && !nonInteractiveDelete() {
 		if confirmed, err := confirmDelete(stdin, stdout, plan.Name); err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
@@ -328,8 +398,7 @@ func runDeletePlan(program string, stdin io.Reader, stdout, stderr io.Writer, ar
 }
 
 func runAddTask(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("add-task", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("add-task", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	description := fs.String("description", "", "task description")
 	parent := fs.String("parent", "", "parent task name or id for subtasks")
@@ -345,6 +414,9 @@ func runAddTask(program string, stdout, stderr io.Writer, args []string) int {
 		"--depends-on":  true,
 		"--json":        false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if fs.NArg() != 2 {
@@ -399,8 +471,7 @@ func runAddTask(program string, stdout, stderr io.Writer, args []string) int {
 }
 
 func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("update-task", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("update-task", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	status := fs.String("status", "", "new task status")
 	name := fs.String("name", "", "new task name")
@@ -424,6 +495,9 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 		"--clear-dependencies":     false,
 		"--json":                   false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if fs.NArg() != 2 {
@@ -503,14 +577,16 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 }
 
 func runDeleteTask(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("delete-task", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("delete-task", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	jsonOut := fs.Bool("json", false, "emit json")
 	if err := fs.Parse(reorderFlags(args, map[string]bool{
 		"--dir":  true,
 		"--json": false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if fs.NArg() != 2 {
@@ -549,14 +625,16 @@ func runDeleteTask(program string, stdout, stderr io.Writer, args []string) int 
 }
 
 func runReady(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("ready", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("ready", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	jsonOut := fs.Bool("json", false, "emit json")
 	if err := fs.Parse(reorderFlags(args, map[string]bool{
 		"--dir":  true,
 		"--json": false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if fs.NArg() != 1 {
@@ -600,8 +678,7 @@ func runReady(program string, stdout, stderr io.Writer, args []string) int {
 }
 
 func runNext(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("next", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("next", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	sessionID := fs.String("session", "", "prefer tasks for this session")
 	jsonOut := fs.Bool("json", false, "emit json")
@@ -610,6 +687,9 @@ func runNext(program string, stdout, stderr io.Writer, args []string) int {
 		"--session": true,
 		"--json":    false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if fs.NArg() != 1 {
@@ -639,8 +719,7 @@ func runNext(program string, stdout, stderr io.Writer, args []string) int {
 }
 
 func runClaimNext(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("claim-next", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("claim-next", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	sessionID := fs.String("session", "", "session claiming the task")
 	jsonOut := fs.Bool("json", false, "emit json")
@@ -649,6 +728,9 @@ func runClaimNext(program string, stdout, stderr io.Writer, args []string) int {
 		"--session": true,
 		"--json":    false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if strings.TrimSpace(*sessionID) == "" {
@@ -692,8 +774,7 @@ func runClaimNext(program string, stdout, stderr io.Writer, args []string) int {
 }
 
 func runBindSession(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("bind-session", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("bind-session", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	sessionID := fs.String("session", "", "session id to bind")
 	jsonOut := fs.Bool("json", false, "emit json")
@@ -702,6 +783,9 @@ func runBindSession(program string, stdout, stderr io.Writer, args []string) int
 		"--session": true,
 		"--json":    false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if fs.NArg() != 1 || strings.TrimSpace(*sessionID) == "" {
@@ -734,14 +818,16 @@ func runBindSession(program string, stdout, stderr io.Writer, args []string) int
 }
 
 func runBindCurrent(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("bind-current", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("bind-current", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	jsonOut := fs.Bool("json", false, "emit json")
 	if err := fs.Parse(reorderFlags(args, map[string]bool{
 		"--dir":  true,
 		"--json": false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if fs.NArg() != 1 {
@@ -774,8 +860,7 @@ func runBindCurrent(program string, stdout, stderr io.Writer, args []string) int
 }
 
 func runInstall(program string, stdout, stderr io.Writer, args []string) int {
-	fs := flag.NewFlagSet("install", flag.ContinueOnError)
-	fs.SetOutput(stderr)
+	fs := newCommandFlagSet("install", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	global := fs.Bool("global", false, "install into provider home instead of the current workspace")
 	jsonOut := fs.Bool("json", false, "emit json")
@@ -784,6 +869,9 @@ func runInstall(program string, stdout, stderr io.Writer, args []string) int {
 		"--global": false,
 		"--json":   false,
 	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
 		return 1
 	}
 	if fs.NArg() != 1 {
@@ -816,25 +904,227 @@ func runInstall(program string, stdout, stderr io.Writer, args []string) int {
 	return 0
 }
 
+type helpEntry struct {
+	Summary  string
+	Usage    string
+	Details  []string
+	Examples []string
+}
+
+var commandHelpEntries = map[string]helpEntry{
+	"init": {
+		Summary: "Initialize a workspace-local .agent-plan store.",
+		Usage:   "init [--dir PATH] [--json]",
+		Details: []string{
+			"Creates the .agent-plan workspace metadata if it does not already exist.",
+			"When --dir is omitted, the CLI falls back to AGENT_PLAN_DIR before using the current directory.",
+		},
+		Examples: []string{
+			"init --dir /workspace --json",
+		},
+	},
+	"create": {
+		Summary: "Create a new plan.",
+		Usage:   "create [--dir PATH] [--description TEXT] [--spec-path PATH] [--json] <name>",
+		Details: []string{
+			"Creates a plan record and an empty task manifest.",
+			"Use a descriptive name and optional spec path for operator context.",
+		},
+		Examples: []string{
+			`create "API Plan" --description "Track parity work" --json`,
+		},
+	},
+	"list": {
+		Summary: "List plans in the current workspace.",
+		Usage:   "list [--dir PATH] [--json]",
+		Details: []string{
+			"Shows plan IDs, names, and completion counts.",
+		},
+	},
+	"get": {
+		Summary: "Load a plan and all of its tasks.",
+		Usage:   "get [--dir PATH] [--json] [--verbose] <plan>",
+		Details: []string{
+			"Accepts a plan ID or exact plan name.",
+			"Use show when you want the explicit whole-plan snapshot command name.",
+		},
+		Examples: []string{
+			"get c1ebfc53 --json",
+			`get "API Plan" --verbose`,
+		},
+	},
+	"show": {
+		Summary: "Show the current plan state and all tasks.",
+		Usage:   "show [--dir PATH] [--json] [--verbose] <plan>",
+		Details: []string{
+			"Returns the same plan payload as get, but with a more explicit name for agent loops.",
+			"Accepts a plan ID or exact plan name.",
+		},
+		Examples: []string{
+			"show c1ebfc53 --json",
+		},
+	},
+	"update": {
+		Summary: "Update plan metadata.",
+		Usage:   "update [--dir PATH] [--name TEXT] [--description TEXT] [--session-id ID] [--spec-path PATH] [--clear-sessions] [--json] <plan>",
+		Details: []string{
+			"Session IDs scope a plan to specific sessions when you want that metadata recorded on the plan.",
+		},
+	},
+	"delete": {
+		Summary: "Delete a plan.",
+		Usage:   "delete [--dir PATH] [--yes] [--json] <plan>",
+		Details: []string{
+			"Prompts for confirmation unless --yes is passed or AGENT_PLAN_NONINTERACTIVE=1 is set.",
+			"Accepts a plan ID or exact plan name.",
+		},
+	},
+	"add-task": {
+		Summary: "Add a task to a plan.",
+		Usage:   "add-task [--dir PATH] [--description TEXT] [--parent TASK] [--order N] [--depends-on TASK] [--json] <plan> <name>",
+		Details: []string{
+			"Dependency and parent references accept task IDs or exact task names, but IDs are safer for agents.",
+		},
+		Examples: []string{
+			`add-task c1ebfc53 "Implement store" --depends-on 001-design-store --json`,
+		},
+	},
+	"update-task": {
+		Summary: "Update task status or metadata.",
+		Usage:   "update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--assigned-session ID] [--clear-assigned-session] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>",
+		Details: []string{
+			"Valid statuses: not_started, in_progress, blocked, complete, cancelled.",
+			"Setting --status complete archives the durable record into history/*.done.",
+		},
+		Examples: []string{
+			"update-task c1ebfc53 001-design-store --status in_progress --json",
+			"update-task c1ebfc53 001-design-store --status complete --json",
+		},
+	},
+	"delete-task": {
+		Summary: "Delete a task and any descendants.",
+		Usage:   "delete-task [--dir PATH] [--json] <plan> <task>",
+	},
+	"ready": {
+		Summary: "List actionable tasks whose dependencies are complete.",
+		Usage:   "ready [--dir PATH] [--json] <plan>",
+		Details: []string{
+			"Hierarchy alone does not block readiness; only depends_on relationships do.",
+		},
+	},
+	"next": {
+		Summary: "Select the next actionable task.",
+		Usage:   "next [--dir PATH] [--session ID] [--json] <plan>",
+		Details: []string{
+			"With --session, prefers tasks already assigned to that session before unassigned ready work.",
+			"Without --session, selection is unscoped and does not infer a bound session.",
+		},
+	},
+	"claim-next": {
+		Summary: "Claim the next actionable task for a session.",
+		Usage:   "claim-next [--dir PATH] --session ID [--json] <plan>",
+		Details: []string{
+			"Claims through an exclusive .claim file and moves the task to in_progress.",
+		},
+	},
+	"bind-session": {
+		Summary: "Bind an explicit session ID to a plan.",
+		Usage:   "bind-session [--dir PATH] --session ID [--json] <plan>",
+		Details: []string{
+			"Preferred for agent workflows because the session identity is explicit.",
+		},
+	},
+	"bind-current": {
+		Summary: "Bind the current runtime session to a plan.",
+		Usage:   "bind-current [--dir PATH] [--json] <plan>",
+		Details: []string{
+			"Resolves the session from AGENT_DASHBOARD_SESSION_ID, then CODEX_THREAD_ID, then AGENT_SESSION_ID.",
+			"Use bind-session instead when the caller can pass a stable session ID explicitly.",
+		},
+	},
+	"install": {
+		Summary: "Install managed guidance into AGENTS.md, CLAUDE.md, or a skill.",
+		Usage:   "install [--dir PATH] [--global] [--json] <AGENTS.md|CLAUDE.md|skill>",
+		Details: []string{
+			"Intended for onboarding or setup, not for plan/task lifecycle operations.",
+		},
+	},
+	"mcp": {
+		Summary: "Run the MCP stdio server.",
+		Usage:   "mcp [--dir PATH]",
+		Details: []string{
+			"Exposes the same plan workflow over MCP tools such as plan_show, plan_update_task, and plan_claim_next.",
+		},
+	},
+}
+
+var commandHelpOrder = []string{
+	"init",
+	"create",
+	"list",
+	"get",
+	"show",
+	"update",
+	"delete",
+	"add-task",
+	"update-task",
+	"delete-task",
+	"ready",
+	"next",
+	"claim-next",
+	"bind-session",
+	"bind-current",
+	"install",
+	"mcp",
+}
+
 func printUsage(w io.Writer, program string) {
-	fmt.Fprintf(w, `Usage:
-  %s init [--dir PATH] [--json]
-  %s create [--dir PATH] [--description TEXT] [--spec-path PATH] [--json] <name>
-  %s list [--dir PATH] [--json]
-  %s get [--dir PATH] [--json] [--verbose] <plan>
-  %s update [--dir PATH] [--name TEXT] [--description TEXT] [--session-id ID] [--spec-path PATH] [--clear-sessions] [--json] <plan>
-  %s delete [--dir PATH] [--yes] [--json] <plan>
-  %s add-task [--dir PATH] [--description TEXT] [--parent TASK] [--order N] [--depends-on TASK] [--json] <plan> <name>
-  %s update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--assigned-session ID] [--clear-assigned-session] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>
-  %s delete-task [--dir PATH] [--json] <plan> <task>
-  %s ready [--dir PATH] [--json] <plan>
-  %s next [--dir PATH] [--session ID] [--json] <plan>
-  %s claim-next [--dir PATH] --session ID [--json] <plan>
-  %s bind-session [--dir PATH] --session ID [--json] <plan>
-  %s bind-current [--dir PATH] [--json] <plan>
-  %s install [--dir PATH] [--global] [--json] <AGENTS.md|CLAUDE.md|skill>
-  %s mcp [--dir PATH]
-`, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program, program)
+	fmt.Fprintf(w, "Usage:\n  %s <command> [options]\n\nCommands:\n", program)
+	for _, name := range commandHelpOrder {
+		entry := commandHelpEntries[name]
+		fmt.Fprintf(w, "  %-12s %s\n", name, entry.Summary)
+	}
+	fmt.Fprintf(w, "\nEnvironment:\n")
+	fmt.Fprintf(w, "  AGENT_PLAN_DIR              Workspace root fallback when --dir is omitted.\n")
+	fmt.Fprintf(w, "  AGENT_PLAN_NONINTERACTIVE   Set to 1 to skip delete confirmation prompts.\n")
+	fmt.Fprintf(w, "  AGENT_DASHBOARD_SESSION_ID  First bind-current session source.\n")
+	fmt.Fprintf(w, "  CODEX_THREAD_ID             Second bind-current session source.\n")
+	fmt.Fprintf(w, "  AGENT_SESSION_ID            Third bind-current session source.\n")
+	fmt.Fprintf(w, "\nExamples:\n")
+	fmt.Fprintf(w, "  %s create \"API Plan\" --description \"Track parity work\" --json\n", program)
+	fmt.Fprintf(w, "  %s show c1ebfc53 --json\n", program)
+	fmt.Fprintf(w, "\nRun `%s help <command>` or `%s <command> --help` for command details.\n", program, program)
+}
+
+func printCommandHelp(w io.Writer, program, command string) bool {
+	entry, ok := commandHelpEntries[command]
+	if !ok {
+		return false
+	}
+	fmt.Fprintf(w, "Usage:\n  %s %s\n\n", program, entry.Usage)
+	fmt.Fprintf(w, "%s\n", entry.Summary)
+	if len(entry.Details) > 0 {
+		fmt.Fprintf(w, "\nDetails:\n")
+		for _, detail := range entry.Details {
+			fmt.Fprintf(w, "  - %s\n", detail)
+		}
+	}
+	if len(entry.Examples) > 0 {
+		fmt.Fprintf(w, "\nExamples:\n")
+		for _, example := range entry.Examples {
+			fmt.Fprintf(w, "  %s %s\n", program, example)
+		}
+	}
+	return true
+}
+
+func newCommandFlagSet(name, program string, stderr io.Writer) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.Usage = func() {
+		_ = printCommandHelp(stderr, program, name)
+	}
+	return fs
 }
 
 func writeJSON(w io.Writer, value any, stderr io.Writer) int {
@@ -972,24 +1262,7 @@ func resolvePlan(store *Store, planRef string) (*Plan, error) {
 		}
 		return nil, fmt.Errorf("multiple plans matched %q: %s", cleaned, strings.Join(ids, ", "))
 	}
-	folded := strings.ToLower(cleaned)
-	casefold := make([]PlanSummary, 0)
-	for _, summary := range summaries {
-		if strings.ToLower(summary.Name) == folded {
-			casefold = append(casefold, summary)
-		}
-	}
-	if len(casefold) == 1 {
-		return store.GetPlan(casefold[0].ID)
-	}
-	if len(casefold) > 1 {
-		ids := make([]string, 0, len(casefold))
-		for _, summary := range casefold {
-			ids = append(ids, summary.ID)
-		}
-		return nil, fmt.Errorf("multiple plans matched %q: %s", cleaned, strings.Join(ids, ", "))
-	}
-	return nil, fmt.Errorf("plan not found: %s", cleaned)
+	return nil, fmt.Errorf("plan not found: %s (expected plan ID or exact plan name)", cleaned)
 }
 
 func resolveTask(plan *Plan, taskRef, label string) (*TaskRecord, error) {
@@ -1016,24 +1289,7 @@ func resolveTask(plan *Plan, taskRef, label string) (*TaskRecord, error) {
 		}
 		return nil, fmt.Errorf("multiple tasks matched %q: %s", cleaned, strings.Join(ids, ", "))
 	}
-	folded := strings.ToLower(cleaned)
-	casefold := make([]*TaskRecord, 0)
-	for i := range plan.Tasks {
-		if strings.ToLower(plan.Tasks[i].Name) == folded {
-			casefold = append(casefold, &plan.Tasks[i])
-		}
-	}
-	if len(casefold) == 1 {
-		return casefold[0], nil
-	}
-	if len(casefold) > 1 {
-		ids := make([]string, 0, len(casefold))
-		for _, task := range casefold {
-			ids = append(ids, task.ID)
-		}
-		return nil, fmt.Errorf("multiple tasks matched %q: %s", cleaned, strings.Join(ids, ", "))
-	}
-	return nil, fmt.Errorf("%s not found: %s", label, cleaned)
+	return nil, fmt.Errorf("%s not found: %s (expected task ID or exact task name)", label, cleaned)
 }
 
 func resolveDependencyIDs(plan *Plan, refs []string) ([]string, error) {
@@ -1108,6 +1364,25 @@ func dashIfEmpty(value string) string {
 		return "-"
 	}
 	return value
+}
+
+func nonInteractiveDelete() bool {
+	value := strings.TrimSpace(strings.ToLower(os.Getenv("AGENT_PLAN_NONINTERACTIVE")))
+	switch value {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func isHelpArg(value string) bool {
+	switch strings.TrimSpace(value) {
+	case "-h", "--help", "help":
+		return true
+	default:
+		return false
+	}
 }
 
 func isFlagPassed(args []string, name string) bool {
