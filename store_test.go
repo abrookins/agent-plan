@@ -60,30 +60,22 @@ func TestStoreMultiPlanWorkflow(t *testing.T) {
 		t.Fatalf("ready = %#v", ready)
 	}
 
-	sessionID := "sess-1"
+	claimer := "agent-1"
 	updatedChild, err := store.UpdateTask(plan.ID, child.ID, TaskUpdateOptions{
-		AssignedSessionID: &sessionID,
+		ClaimedBy: &claimer,
 	})
 	if err != nil {
 		t.Fatalf("UpdateTask(assign) error = %v", err)
 	}
-	if updatedChild.AssignedSessionID != sessionID {
+	if updatedChild.ClaimedBy != claimer {
 		t.Fatalf("updatedChild = %#v", updatedChild)
 	}
 
-	binding, err := store.BindSession(plan.ID, sessionID)
-	if err != nil {
-		t.Fatalf("BindSession() error = %v", err)
-	}
-	if binding.CurrentTaskID != child.ID {
-		t.Fatalf("binding = %#v", binding)
-	}
-
-	claimed, err := store.ClaimNext(plan.ID, sessionID)
+	claimed, err := store.ClaimNext(plan.ID, claimer)
 	if err != nil {
 		t.Fatalf("ClaimNext() error = %v", err)
 	}
-	if claimed == nil || claimed.Status != StatusInProgress || claimed.AssignedSessionID != sessionID {
+	if claimed == nil || claimed.Status != StatusInProgress || claimed.ClaimedBy != claimer {
 		t.Fatalf("claimed = %#v", claimed)
 	}
 
@@ -110,7 +102,6 @@ func TestStoreMultiPlanWorkflow(t *testing.T) {
 		Name:        &name,
 		Description: &desc,
 		SpecPath:    &spec,
-		SessionIDs:  []string{sessionID},
 	})
 	if err != nil {
 		t.Fatalf("UpdatePlan() error = %v", err)

@@ -94,14 +94,12 @@ func buildCodexGuidance() string {
 When the prompt or current work references a shared plan or task list, use ` + "`agent-plan`" + `.
 
 - Start with ` + "`agent-plan show <plan_id>`" + ` or ` + "`agent-plan get <plan_id>`" + `
-- Prefer ` + "`agent-plan bind-session <plan_id> --session <session-id>`" + ` for explicit agent workflows
-- Use ` + "`agent-plan bind-current <plan_id>`" + ` only when the runtime already exports one of ` + "`AGENT_DASHBOARD_SESSION_ID`" + `, ` + "`CODEX_THREAD_ID`" + `, or ` + "`AGENT_SESSION_ID`" + `
 - Mark tasks ` + "`in_progress`" + ` when you start
 - Mark tasks ` + "`complete`" + ` when you finish so the record moves into ` + "`history/*.done`" + `
 - Add discovered work with ` + "`agent-plan add-task <plan_id> \"Task name\" --description \"Why it is needed\"`" + `
 - Use ` + "`--depends-on <task_id>`" + ` when a task is blocked by another task
 - Use ` + "`--parent <task_id>`" + ` only for hierarchy; parent-child nesting does not block ` + "`ready`" + ` or ` + "`next`" + `
-- Use ` + "`next --session <session-id>`" + ` when session affinity matters; plain ` + "`next`" + ` does not infer a bound session
+- Use ` + "`next --by <agent-id>`" + ` when claimer affinity matters; plain ` + "`next`" + ` does not infer external claimer context
 - Prefer task IDs. Names must match exactly when used as references
 `)
 }
@@ -119,15 +117,13 @@ Use this skill when a prompt references a shared plan, task list, or explicit ` 
 ## Required behavior
 
 - Start with ` + "`agent-plan show <plan_id>`" + ` or ` + "`agent-plan get <plan_id>`" + `
-- Prefer ` + "`agent-plan bind-session <plan_id> --session <session-id>`" + ` for explicit agent workflows
-- Use ` + "`agent-plan bind-current <plan_id>`" + ` only when the runtime already exports one of ` + "`AGENT_DASHBOARD_SESSION_ID`" + `, ` + "`CODEX_THREAD_ID`" + `, or ` + "`AGENT_SESSION_ID`" + `
 - Mark the current task ` + "`in_progress`" + ` when you begin work
 - Mark the task ` + "`complete`" + ` when you finish so the record moves into ` + "`history/*.done`" + `
 - Add discovered follow-up work with ` + "`agent-plan add-task <plan_id> \"Task name\" --description \"Why it is needed\"`" + `
 - Use ` + "`--depends-on <task_id>`" + ` for blocking relationships
 - Use ` + "`--parent <task_id>`" + ` only for hierarchy or subtasks
 - ` + "`agent-plan ready`" + ` and ` + "`agent-plan next`" + ` only use ` + "`depends_on`" + `; a child task without dependencies is still ready
-- Use ` + "`next --session <session-id>`" + ` when session affinity matters; plain ` + "`next`" + ` does not infer a bound session
+- Use ` + "`next --by <agent-id>`" + ` when claimer affinity matters; plain ` + "`next`" + ` does not infer external claimer context
 - Prefer task IDs. Names must match exactly when used as references
 
 ## Example

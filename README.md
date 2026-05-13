@@ -9,7 +9,7 @@ The current Go implementation supports:
 
 - multiple named plans per workspace
 - ordered tasks with hierarchy and dependencies
-- session-aware task selection and claiming
+- claim-aware task selection and claiming
 - explicit whole-plan state loading with `show`
 - JSON output for agent-facing commands
 
@@ -44,8 +44,6 @@ go build -o dist/agent-plan ./cmd/agent-plan
 ```text
 .agent-plan/
   workspace.json
-  sessions/
-    <session-id>.json
   plans/
     <plan-id>/
       plan.json
@@ -59,13 +57,11 @@ go build -o dist/agent-plan ./cmd/agent-plan
 ```
 
 - `workspace.json` tracks the store version and workspace-level metadata.
-- `plan.json` stores plan metadata such as name, description, spec path, and
-  scoped session IDs.
+- `plan.json` stores plan metadata such as name, description, and spec path.
 - `manifest.json` is the per-plan task summary index used for fast reads.
 - `tasks/*.md` is the durable source of truth for active tasks.
 - `tasks/*.claim` is the exclusive-create coordination primitive.
 - `history/*.done` preserves completed task records.
-- `sessions/*.json` stores local session binding snapshots.
 
 ## Git
 
@@ -84,14 +80,12 @@ Do not commit the coordination files:
 
 - `.agent-plan/plans/*/manifest.lock`
 - `.agent-plan/plans/*/tasks/*.claim`
-- `.agent-plan/sessions/*.json`
 
 Example `.gitignore` entries:
 
 ```gitignore
 .agent-plan/plans/*/manifest.lock
 .agent-plan/plans/*/tasks/*.claim
-.agent-plan/sessions/*.json
 ```
 
 ## CLI
@@ -111,10 +105,8 @@ agent-plan update-task <plan-id> <task-id> --status in_progress
 agent-plan update-task <plan-id> <task-id> --status complete
 agent-plan delete-task <plan-id> <task-id>
 agent-plan ready <plan-id> --json
-agent-plan next <plan-id> --session <session-id> --json
-agent-plan claim-next <plan-id> --session <session-id> --json
-agent-plan bind-session <plan-id> --session <session-id>
-agent-plan bind-current <plan-id>
+agent-plan next <plan-id> --by <agent-id> --json
+agent-plan claim-next <plan-id> --by <agent-id> --json
 agent-plan install AGENTS.md
 agent-plan mcp
 ```
@@ -134,16 +126,9 @@ defines its own wire format.
 Use task IDs when scripting agent workflows. Plan and task names are supported
 only as exact matches; there is no fuzzy matching.
 
-`bind-current` resolves the session from the first populated env var in this
-order:
-
-- `AGENT_DASHBOARD_SESSION_ID`
-- `CODEX_THREAD_ID`
-- `AGENT_SESSION_ID`
-
-Prefer `bind-session --session <id>` for agents that can pass an explicit
-session ID. Likewise, prefer `next --session <id>` when session affinity
-matters; plain `next` does not infer a bound session.
+Task-level claim coordination still exists where it affects selection and
+claiming. Use `next --by <id>` when claimer affinity matters; plain `next` does
+not infer any external claimer context.
 
 ## Task Status
 
@@ -181,8 +166,6 @@ The stdio server exposes the full plan workflow:
 - `plan_ready`
 - `plan_next`
 - `plan_claim_next`
-- `plan_bind_session`
-- `plan_bind_current`
 - `plan_install`
 
 Example MCP config:

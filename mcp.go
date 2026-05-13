@@ -23,7 +23,7 @@ func (s *MCPServer) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	server := &mcpproto.Server{
 		ProtocolVersion: protocolVersion,
 		Name:            "agent-plan",
-		Version:         "0.2.0",
+		Version:         "0.3.0",
 		Instructions:    "Filesystem-backed shared plan management over workspace-local .agent-plan directories.",
 		Provider:        s,
 	}
@@ -71,12 +71,10 @@ func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 			Name:        "plan_update",
 			Description: "Update plan metadata.",
 			InputSchema: schema(rootSchema, map[string]any{
-				"plan":           planSchema,
-				"name":           map[string]any{"type": "string"},
-				"description":    map[string]any{"type": "string"},
-				"spec_path":      map[string]any{"type": "string"},
-				"session_ids":    map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"clear_sessions": map[string]any{"type": "boolean"},
+				"plan":        planSchema,
+				"name":        map[string]any{"type": "string"},
+				"description": map[string]any{"type": "string"},
+				"spec_path":   map[string]any{"type": "string"},
 			}, "plan"),
 		},
 		{
@@ -100,16 +98,16 @@ func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 			Name:        "plan_update_task",
 			Description: "Update task status or details.",
 			InputSchema: schema(rootSchema, map[string]any{
-				"plan":                   planSchema,
-				"task":                   taskSchema,
-				"status":                 map[string]any{"type": "string"},
-				"name":                   map[string]any{"type": "string"},
-				"description":            map[string]any{"type": "string"},
-				"assigned_session_id":    map[string]any{"type": "string"},
-				"clear_assigned_session": map[string]any{"type": "boolean"},
-				"depends_on":             map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"clear_dependencies":     map[string]any{"type": "boolean"},
-				"order":                  map[string]any{"type": "integer"},
+				"plan":               planSchema,
+				"task":               taskSchema,
+				"status":             map[string]any{"type": "string"},
+				"name":               map[string]any{"type": "string"},
+				"description":        map[string]any{"type": "string"},
+				"claimed_by":         map[string]any{"type": "string"},
+				"clear_claimed_by":   map[string]any{"type": "boolean"},
+				"depends_on":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"clear_dependencies": map[string]any{"type": "boolean"},
+				"order":              map[string]any{"type": "integer"},
 			}, "plan", "task"),
 		},
 		{
@@ -124,32 +122,19 @@ func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 		},
 		{
 			Name:        "plan_next",
-			Description: "Select the next actionable task, optionally preferring a session.",
+			Description: "Select the next actionable task, optionally preferring tasks already claimed by a specific agent id.",
 			InputSchema: schema(rootSchema, map[string]any{
-				"plan":    planSchema,
-				"session": map[string]any{"type": "string"},
+				"plan": planSchema,
+				"by":   map[string]any{"type": "string"},
 			}, "plan"),
 		},
 		{
 			Name:        "plan_claim_next",
-			Description: "Claim the next actionable task for a session.",
+			Description: "Claim the next actionable task, optionally recording a specific agent id as the claimer.",
 			InputSchema: schema(rootSchema, map[string]any{
-				"plan":    planSchema,
-				"session": map[string]any{"type": "string"},
-			}, "plan", "session"),
-		},
-		{
-			Name:        "plan_bind_session",
-			Description: "Bind a session to a plan in the local workspace metadata.",
-			InputSchema: schema(rootSchema, map[string]any{
-				"plan":    planSchema,
-				"session": map[string]any{"type": "string"},
-			}, "plan", "session"),
-		},
-		{
-			Name:        "plan_bind_current",
-			Description: "Bind the current runtime session to a plan using environment variables.",
-			InputSchema: schema(rootSchema, map[string]any{"plan": planSchema}, "plan"),
+				"plan": planSchema,
+				"by":   map[string]any{"type": "string"},
+			}, "plan"),
 		},
 		{
 			Name:        "plan_install",
@@ -298,7 +283,7 @@ func (s *MCPServer) CallTool(_ context.Context, name string, args map[string]any
 		if err != nil {
 			return toolErr(err)
 		}
-		task := plan.SelectNextTask(optionalString(args, "session"))
+		task := plan.SelectNextTask(optionalString(args, "by"))
 		if task == nil {
 			return toolOK("no ready task", map[string]any{"task": nil})
 		}
@@ -308,7 +293,7 @@ func (s *MCPServer) CallTool(_ context.Context, name string, args map[string]any
 		if err != nil {
 			return toolErr(err)
 		}
-		record, err := store.ClaimNext(plan.ID, optionalString(args, "session"))
+		record, err := store.ClaimNext(plan.ID, optionalString(args, "by"))
 		if err != nil {
 			return toolErr(err)
 		}
@@ -320,26 +305,6 @@ func (s *MCPServer) CallTool(_ context.Context, name string, args map[string]any
 			return toolErr(err)
 		}
 		return toolOK("task claimed", taskPayload(updatedPlan, *record))
-	case "plan_bind_session":
-		plan, err := resolvePlanFromArgs(store, args)
-		if err != nil {
-			return toolErr(err)
-		}
-		binding, err := store.BindSession(plan.ID, optionalString(args, "session"))
-		if err != nil {
-			return toolErr(err)
-		}
-		return toolOK("session bound", binding)
-	case "plan_bind_current":
-		plan, err := resolvePlanFromArgs(store, args)
-		if err != nil {
-			return toolErr(err)
-		}
-		binding, err := store.BindCurrent(plan.ID)
-		if err != nil {
-			return toolErr(err)
-		}
-		return toolOK("current session bound", binding)
 	case "plan_install":
 		path, err := InstallGuidance(optionalString(args, "target"), optionalBool(args, "global"), store.Root)
 		if err != nil {
@@ -457,10 +422,7 @@ func resolveTaskFromArgs(plan *Plan, args map[string]any, key string) (*TaskReco
 }
 
 func planUpdateOptionsFromArgs(args map[string]any) (PlanUpdateOptions, error) {
-	opts := PlanUpdateOptions{
-		SessionIDs:    optionalStringSlice(args, "session_ids"),
-		ClearSessions: optionalBool(args, "clear_sessions"),
-	}
+	opts := PlanUpdateOptions{}
 	if _, ok := args["name"]; ok {
 		value := optionalString(args, "name")
 		opts.Name = &value
@@ -478,8 +440,8 @@ func planUpdateOptionsFromArgs(args map[string]any) (PlanUpdateOptions, error) {
 
 func taskUpdateOptionsFromArgs(plan *Plan, taskID string, args map[string]any) (TaskUpdateOptions, error) {
 	opts := TaskUpdateOptions{
-		ClearAssignedSession: optionalBool(args, "clear_assigned_session"),
-		ClearDependencies:    optionalBool(args, "clear_dependencies"),
+		ClearClaimedBy:    optionalBool(args, "clear_claimed_by"),
+		ClearDependencies: optionalBool(args, "clear_dependencies"),
 	}
 	if _, ok := args["status"]; ok {
 		value := Status(optionalString(args, "status"))
@@ -496,9 +458,9 @@ func taskUpdateOptionsFromArgs(plan *Plan, taskID string, args map[string]any) (
 		value := optionalString(args, "description")
 		opts.Description = &value
 	}
-	if _, ok := args["assigned_session_id"]; ok {
-		value := optionalString(args, "assigned_session_id")
-		opts.AssignedSessionID = &value
+	if _, ok := args["claimed_by"]; ok {
+		value := optionalString(args, "claimed_by")
+		opts.ClaimedBy = &value
 	}
 	if deps := optionalStringSlice(args, "depends_on"); deps != nil {
 		resolved := make([]string, 0, len(deps))

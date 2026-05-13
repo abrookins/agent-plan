@@ -3,7 +3,7 @@
 This document defines the manual QA plan for the Go `agent-plan` binary. It is
 intended for release validation, regression testing, and focused verification of
 feature work that changes the CLI, MCP server, filesystem store, migration
-behavior, or session-aware task coordination.
+behavior, or claim-aware task coordination.
 
 ## Scope
 
@@ -14,7 +14,7 @@ This spec covers every user-facing feature exposed by the Go binary:
 - JSON output paths
 - MCP stdio server behavior
 - filesystem layout and migration
-- session binding and task selection
+- claim-aware task selection
 - exclusive-claim coordination
 - guidance installation targets
 
@@ -84,7 +84,7 @@ Prepend `"$AP_BIN"` to every command example in the cases below.
 Use these identifiers unless a case needs different values:
 
 - plan names: `Alpha Plan`, `Beta Plan`
-- session IDs: `session-a`, `session-b`
+- agent IDs: `agent-a`, `agent-b`
 - task names: `Task A`, `Task B`, `Task C`
 - spec path: `docs/spec.md`
 
@@ -109,7 +109,6 @@ Expected results:
 - JSON contains `root` and `meta_dir`
 - `.agent-plan/workspace.json` exists
 - `.agent-plan/plans/` exists
-- `.agent-plan/sessions/` exists
 
 ### QA-CLI-02: `create`, `list`, `get`, `update`, and `delete` manage plans
 
@@ -118,14 +117,14 @@ Steps:
 1. Run `create` twice for `Alpha Plan` and `Beta Plan`.
 2. Run `list --json`.
 3. Run `get <plan-id> --json` for `Alpha Plan`.
-4. Run `update <plan-id> --description "Updated" --spec-path docs/spec.md --session-id session-a --json`.
+4. Run `update <plan-id> --description "Updated" --spec-path docs/spec.md --json`.
 5. Run `delete <plan-id> --yes --json` on `Beta Plan`.
 
 Expected results:
 
 - both plans appear in `list`
 - `get` returns stable plan metadata plus task summary fields
-- `update` persists `description`, `spec_path`, and `session_ids`
+- `update` persists `description` and `spec_path`
 - deleted plans disappear from subsequent `list` and `get` fails for that plan
 
 ### QA-CLI-03: `delete` refuses destructive action without confirmation
@@ -165,17 +164,17 @@ Expected results:
 Steps:
 
 1. Run `update-task` on `Task A` with:
-   `--status in_progress --description "updated" --assigned-session session-a --json`
+   `--status in_progress --description "updated" --claimed-by agent-a --json`
 2. Run `update-task` again with:
    `--depends-on <task-b-id> --order 50 --json`
 3. Run `update-task` again with:
-   `--clear-dependencies --clear-assigned-session --status blocked --json`
+   `--clear-dependencies --clear-claimed-by --status blocked --json`
 
 Expected results:
 
 - status transitions persist
 - updated description persists
-- `assigned_session_id` is added and then removed
+- `claimed_by` is added and then removed
 - dependencies and order update correctly
 
 ### QA-CLI-06: `delete-task` removes active task records
@@ -207,25 +206,25 @@ Expected results:
 - child task without dependencies is also ready
 - dependency-blocked task is absent until its dependency completes
 
-### QA-CLI-08: `next` prefers assigned work for a session
+### QA-CLI-08: `next` prefers already-claimed work for a claimer
 
 Steps:
 
-1. Assign `Task A` to `session-a`.
-2. Leave `Task B` unassigned and ready.
-3. Run `next <plan-id> --session session-a --json`.
-4. Run `next <plan-id> --session session-b --json`.
+1. Claim `Task A` for `agent-a`.
+2. Leave `Task B` unclaimed and ready.
+3. Run `next <plan-id> --by agent-a --json`.
+4. Run `next <plan-id> --by agent-b --json`.
 
 Expected results:
 
-- `session-a` receives `Task A`
-- `session-b` receives the best unassigned ready task
+- `agent-a` receives `Task A`
+- `agent-b` receives the best unclaimed ready task
 
 ### QA-CLI-09: `claim-next` creates exclusive claim state and assigns the task
 
 Steps:
 
-1. Run `claim-next <plan-id> --session session-a --json`.
+1. Run `claim-next <plan-id> --by agent-a --json`.
 2. Inspect `.agent-plan/plans/<plan-id>/tasks/<task-id>.claim`.
 3. Run `get <plan-id> --json`.
 
@@ -233,46 +232,9 @@ Expected results:
 
 - the returned task is ready and now claimed
 - a `.claim` file exists
-- the task shows `assigned_session_id: session-a`
+- the task shows `claimed_by: agent-a`
 
-### QA-CLI-10: `bind-session` writes a local binding snapshot
-
-Steps:
-
-1. Run `bind-session <plan-id> --session session-a --json`.
-2. Inspect `.agent-plan/sessions/session-a.json`.
-3. Run `get <plan-id> --json`.
-
-Expected results:
-
-- the binding file exists
-- the plan records `session-a` in `session_ids`
-- the binding payload names the current plan and current assigned task, if any
-
-### QA-CLI-11: `bind-current` resolves session ID from environment
-
-Steps:
-
-1. Export `AGENT_DASHBOARD_SESSION_ID=current-session`.
-2. Run `bind-current <plan-id> --json`.
-3. Unset the environment variable.
-4. Run `bind-current <plan-id>` again.
-
-Expected results:
-
-- the first command succeeds and binds `current-session`
-- the second command fails with a clear missing-session error
-
-Accepted environment variables:
-
-- `AGENT_DASHBOARD_SESSION_ID`
-- `CODEX_THREAD_ID`
-- `AGENT_SESSION_ID`
-
-Prefer `bind-session --session <id>` in agent workflows that can pass an
-explicit session ID.
-
-### QA-CLI-11A: `show` returns the full current plan state
+### QA-CLI-10: `show` returns the full current plan state
 
 Steps:
 
@@ -285,7 +247,7 @@ Expected results:
 - the text output includes the plan metadata plus task state
 - `show` succeeds with the same plan references accepted by `get`
 
-### QA-CLI-12: removed implicit-plan commands fail explicitly
+### QA-CLI-11: removed implicit-plan commands fail explicitly
 
 Steps:
 
@@ -307,7 +269,7 @@ Expected results:
 - each command exits non-zero
 - the error makes it clear the command is unsupported or unknown
 
-### QA-CLI-13: `install` writes workspace-local guidance
+### QA-CLI-12: `install` writes workspace-local guidance
 
 Steps:
 
@@ -325,7 +287,7 @@ Expected results:
 - managed guidance is idempotent
 - re-running updates the managed block rather than duplicating it
 
-### QA-CLI-14: `install --global` writes to provider home
+### QA-CLI-13: `install --global` writes to provider home
 
 Steps:
 
@@ -341,13 +303,12 @@ Expected results:
   - `$HOME/.codex/skills/agent-plan-management/SKILL.md`
 - no workspace-local guidance file is required for the global case
 
-### QA-CLI-15: usage and validation failures are explicit
+### QA-CLI-14: usage and validation failures are explicit
 
 Verify these failure cases:
 
 - unknown command
 - missing required plan ID
-- missing required session ID for `claim-next` and `bind-session`
 - invalid status for `update-task`
 - unsupported `install` target
 
@@ -356,7 +317,7 @@ Expected results:
 - commands exit non-zero
 - usage text or error text clearly identifies what is missing or invalid
 
-### QA-CLI-16: environment fallbacks stay explicit
+### QA-CLI-15: environment fallbacks stay explicit
 
 Steps:
 
@@ -389,8 +350,6 @@ Run `--json` for:
 - `ready`
 - `next`
 - `claim-next`
-- `bind-session`
-- `bind-current`
 - `install`
 
 Expected results:
@@ -468,8 +427,6 @@ Exercise each tool with valid inputs:
 - `plan_ready`
 - `plan_next`
 - `plan_claim_next`
-- `plan_bind_session`
-- `plan_bind_current`
 - `plan_install`
 
 Expected results:
@@ -515,7 +472,6 @@ After exercising plan and task creation, inspect:
 - `.agent-plan/plans/<plan-id>/plan.json`
 - `.agent-plan/plans/<plan-id>/manifest.json`
 - `.agent-plan/plans/<plan-id>/tasks/*.md`
-- `.agent-plan/sessions/*.json`
 
 Expected results:
 
@@ -570,8 +526,8 @@ Expected results:
 Steps:
 
 1. Create a plan with exactly one ready task.
-2. In two terminals, run `claim-next <plan-id> --session session-a --json` and
-   `claim-next <plan-id> --session session-b --json` as close together as
+2. In two terminals, run `claim-next <plan-id> --by agent-a --json` and
+   `claim-next <plan-id> --by agent-b --json` as close together as
    possible.
 
 Expected results:
@@ -580,18 +536,18 @@ Expected results:
 - the other command reports no claimable task or a claim collision
 - the final task state shows exactly one assignee and one `.claim` file
 
-### QA-CLAIM-02: `next` and `claim-next` honor session preference
+### QA-CLAIM-02: `next` and `claim-next` honor claimer preference
 
 Steps:
 
 1. Create two ready tasks.
-2. Assign one to `session-a`.
-3. Run `next` and `claim-next` from `session-a` and `session-b`.
+2. Claim one for `agent-a`.
+3. Run `next` and `claim-next` with `--by agent-a` and `--by agent-b`.
 
 Expected results:
 
-- `session-a` prefers its assigned task
-- unassigned work is still available to other sessions
+- `agent-a` prefers its claimed task
+- unclaimed work is still available to other claimers
 
 ## Cross-Workspace QA
 

@@ -72,10 +72,6 @@ func runCLI(ctx context.Context, program string, args []string, stdin io.Reader,
 		return runNext(program, stdout, stderr, args[1:])
 	case "claim-next":
 		return runClaimNext(program, stdout, stderr, args[1:])
-	case "bind-session":
-		return runBindSession(program, stdout, stderr, args[1:])
-	case "bind-current":
-		return runBindCurrent(program, stdout, stderr, args[1:])
 	case "install":
 		return runInstall(program, stdout, stderr, args[1:])
 	case "mcp":
@@ -275,18 +271,13 @@ func runUpdatePlan(program string, stdout, stderr io.Writer, args []string) int 
 	name := fs.String("name", "", "new plan name")
 	description := fs.String("description", "", "new plan description")
 	specPath := fs.String("spec-path", "", "related spec path")
-	clearSessions := fs.Bool("clear-sessions", false, "remove all assigned session ids")
 	jsonOut := fs.Bool("json", false, "emit json")
-	var sessionIDs multiStringFlag
-	fs.Var(&sessionIDs, "session-id", "session id allowed to use this plan (repeatable)")
 	if err := fs.Parse(reorderFlags(args, map[string]bool{
-		"--dir":            true,
-		"--name":           true,
-		"--description":    true,
-		"--session-id":     true,
-		"--spec-path":      true,
-		"--clear-sessions": false,
-		"--json":           false,
+		"--dir":         true,
+		"--name":        true,
+		"--description": true,
+		"--spec-path":   true,
+		"--json":        false,
 	})); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -294,7 +285,7 @@ func runUpdatePlan(program string, stdout, stderr io.Writer, args []string) int 
 		return 1
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintf(stderr, "usage: %s update [--dir PATH] [--name TEXT] [--description TEXT] [--session-id ID] [--spec-path PATH] [--clear-sessions] [--json] <plan>\n", program)
+		fmt.Fprintf(stderr, "usage: %s update [--dir PATH] [--name TEXT] [--description TEXT] [--spec-path PATH] [--json] <plan>\n", program)
 		return 1
 	}
 	store, err := Open(*dir)
@@ -321,11 +312,9 @@ func runUpdatePlan(program string, stdout, stderr io.Writer, args []string) int 
 		specPtr = &specCopy
 	}
 	updated, err := store.UpdatePlan(plan.ID, PlanUpdateOptions{
-		Name:          namePtr,
-		Description:   descPtr,
-		SpecPath:      specPtr,
-		SessionIDs:    sessionIDs.values,
-		ClearSessions: *clearSessions,
+		Name:        namePtr,
+		Description: descPtr,
+		SpecPath:    specPtr,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -476,24 +465,24 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 	status := fs.String("status", "", "new task status")
 	name := fs.String("name", "", "new task name")
 	description := fs.String("description", "", "new task description")
-	assignedSession := fs.String("assigned-session", "", "assign task to a specific session id")
-	clearAssigned := fs.Bool("clear-assigned-session", false, "remove any assigned session id from the task")
+	claimedBy := fs.String("claimed-by", "", "record the task as claimed by a specific agent id")
+	clearClaimedBy := fs.Bool("clear-claimed-by", false, "remove any claimed-by value from the task")
 	order := fs.Int("order", -1, "sibling order")
 	clearDependencies := fs.Bool("clear-dependencies", false, "remove dependency links from the task")
 	jsonOut := fs.Bool("json", false, "emit json")
 	var dependsOn multiStringFlag
 	fs.Var(&dependsOn, "depends-on", "task id this task depends on (repeatable)")
 	if err := fs.Parse(reorderFlags(args, map[string]bool{
-		"--dir":                    true,
-		"--status":                 true,
-		"--name":                   true,
-		"--description":            true,
-		"--assigned-session":       true,
-		"--clear-assigned-session": false,
-		"--depends-on":             true,
-		"--order":                  true,
-		"--clear-dependencies":     false,
-		"--json":                   false,
+		"--dir":                true,
+		"--status":             true,
+		"--name":               true,
+		"--description":        true,
+		"--claimed-by":         true,
+		"--clear-claimed-by":   false,
+		"--depends-on":         true,
+		"--order":              true,
+		"--clear-dependencies": false,
+		"--json":               false,
 	})); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -501,7 +490,7 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 		return 1
 	}
 	if fs.NArg() != 2 {
-		fmt.Fprintf(stderr, "usage: %s update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--assigned-session ID] [--clear-assigned-session] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>\n", program)
+		fmt.Fprintf(stderr, "usage: %s update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--claimed-by ID] [--clear-claimed-by] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>\n", program)
 		return 1
 	}
 	store, err := Open(*dir)
@@ -528,7 +517,7 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 		}
 		statusPtr = &value
 	}
-	var namePtr, descPtr, assignedPtr *string
+	var namePtr, descPtr, claimedByPtr *string
 	if isFlagPassed(args, "--name") {
 		value := *name
 		namePtr = &value
@@ -537,9 +526,9 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 		value := *description
 		descPtr = &value
 	}
-	if isFlagPassed(args, "--assigned-session") {
-		value := *assignedSession
-		assignedPtr = &value
+	if isFlagPassed(args, "--claimed-by") {
+		value := *claimedBy
+		claimedByPtr = &value
 	}
 	var deps []string
 	if len(dependsOn.values) > 0 {
@@ -555,14 +544,14 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 		orderPtr = &value
 	}
 	updated, err := store.UpdateTask(plan.ID, task.ID, TaskUpdateOptions{
-		Status:               statusPtr,
-		Name:                 namePtr,
-		Description:          descPtr,
-		AssignedSessionID:    assignedPtr,
-		ClearAssignedSession: *clearAssigned,
-		DependsOn:            deps,
-		ClearDependencies:    *clearDependencies,
-		Order:                orderPtr,
+		Status:            statusPtr,
+		Name:              namePtr,
+		Description:       descPtr,
+		ClaimedBy:         claimedByPtr,
+		ClearClaimedBy:    *clearClaimedBy,
+		DependsOn:         deps,
+		ClearDependencies: *clearDependencies,
+		Order:             orderPtr,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -665,11 +654,11 @@ func runReady(program string, stdout, stderr io.Writer, args []string) int {
 	}
 	for _, task := range ready {
 		fmt.Fprintln(stdout, formatTask(task, 0))
-		assigned := task.AssignedSessionID
-		if assigned == "" {
-			assigned = "(unassigned)"
+		claimedBy := task.ClaimedBy
+		if claimedBy == "" {
+			claimedBy = "(unclaimed)"
 		}
-		fmt.Fprintf(stdout, "    Assigned session: %s\n", assigned)
+		fmt.Fprintf(stdout, "    Claimed by: %s\n", claimedBy)
 		if len(task.DependsOn) > 0 {
 			fmt.Fprintf(stdout, "    Dependencies complete: %s\n", strings.Join(task.DependsOn, ", "))
 		}
@@ -680,12 +669,12 @@ func runReady(program string, stdout, stderr io.Writer, args []string) int {
 func runNext(program string, stdout, stderr io.Writer, args []string) int {
 	fs := newCommandFlagSet("next", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
-	sessionID := fs.String("session", "", "prefer tasks for this session")
+	by := fs.String("by", "", "prefer tasks already claimed by this agent id")
 	jsonOut := fs.Bool("json", false, "emit json")
 	if err := fs.Parse(reorderFlags(args, map[string]bool{
-		"--dir":     true,
-		"--session": true,
-		"--json":    false,
+		"--dir":  true,
+		"--by":   true,
+		"--json": false,
 	})); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
@@ -693,7 +682,7 @@ func runNext(program string, stdout, stderr io.Writer, args []string) int {
 		return 1
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintf(stderr, "usage: %s next [--dir PATH] [--session ID] [--json] <plan>\n", program)
+		fmt.Fprintf(stderr, "usage: %s next [--dir PATH] [--by ID] [--json] <plan>\n", program)
 		return 1
 	}
 	store, err := Open(*dir)
@@ -706,7 +695,7 @@ func runNext(program string, stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	task := plan.SelectNextTask(strings.TrimSpace(*sessionID))
+	task := plan.SelectNextTask(strings.TrimSpace(*by))
 	if task == nil {
 		fmt.Fprintln(stderr, "No ready tasks found.")
 		return 1
@@ -714,31 +703,27 @@ func runNext(program string, stdout, stderr io.Writer, args []string) int {
 	if *jsonOut {
 		return writeJSON(stdout, taskPayload(plan, *task), stderr)
 	}
-	fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", task.ID, task.Status, dashIfEmpty(task.AssignedSessionID), task.Name)
+	fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\n", task.ID, task.Status, dashIfEmpty(task.ClaimedBy), task.Name)
 	return 0
 }
 
 func runClaimNext(program string, stdout, stderr io.Writer, args []string) int {
 	fs := newCommandFlagSet("claim-next", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
-	sessionID := fs.String("session", "", "session claiming the task")
+	by := fs.String("by", "", "agent id claiming the task")
 	jsonOut := fs.Bool("json", false, "emit json")
 	if err := fs.Parse(reorderFlags(args, map[string]bool{
-		"--dir":     true,
-		"--session": true,
-		"--json":    false,
+		"--dir":  true,
+		"--by":   true,
+		"--json": false,
 	})); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return 0
 		}
 		return 1
 	}
-	if strings.TrimSpace(*sessionID) == "" {
-		fmt.Fprintf(stderr, "usage: %s claim-next [--dir PATH] --session ID [--json] <plan>\n", program)
-		return 1
-	}
 	if fs.NArg() != 1 {
-		fmt.Fprintf(stderr, "usage: %s claim-next [--dir PATH] --session ID [--json] <plan>\n", program)
+		fmt.Fprintf(stderr, "usage: %s claim-next [--dir PATH] [--by ID] [--json] <plan>\n", program)
 		return 1
 	}
 	store, err := Open(*dir)
@@ -751,7 +736,7 @@ func runClaimNext(program string, stdout, stderr io.Writer, args []string) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	task, err := store.ClaimNext(plan.ID, *sessionID)
+	task, err := store.ClaimNext(plan.ID, *by)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -770,92 +755,6 @@ func runClaimNext(program string, stdout, stderr io.Writer, args []string) int {
 	}
 	fmt.Fprintf(stdout, "Claimed task: %s\n", task.ID)
 	fmt.Fprintln(stdout, formatTask(*task, 0))
-	return 0
-}
-
-func runBindSession(program string, stdout, stderr io.Writer, args []string) int {
-	fs := newCommandFlagSet("bind-session", program, stderr)
-	dir := fs.String("dir", "", "workspace root")
-	sessionID := fs.String("session", "", "session id to bind")
-	jsonOut := fs.Bool("json", false, "emit json")
-	if err := fs.Parse(reorderFlags(args, map[string]bool{
-		"--dir":     true,
-		"--session": true,
-		"--json":    false,
-	})); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-		return 1
-	}
-	if fs.NArg() != 1 || strings.TrimSpace(*sessionID) == "" {
-		fmt.Fprintf(stderr, "usage: %s bind-session [--dir PATH] --session ID [--json] <plan>\n", program)
-		return 1
-	}
-	store, err := Open(*dir)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	plan, err := resolvePlan(store, fs.Arg(0))
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	binding, err := store.BindSession(plan.ID, *sessionID)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	if *jsonOut {
-		return writeJSON(stdout, binding, stderr)
-	}
-	fmt.Fprintf(stdout, "Bound session %s to plan %s (%s)\n", binding.SessionID, binding.PlanName, binding.PlanID)
-	if binding.CurrentTaskID != "" {
-		fmt.Fprintf(stdout, "Current task: %s %s\n", binding.CurrentTaskID, binding.CurrentTaskName)
-	}
-	return 0
-}
-
-func runBindCurrent(program string, stdout, stderr io.Writer, args []string) int {
-	fs := newCommandFlagSet("bind-current", program, stderr)
-	dir := fs.String("dir", "", "workspace root")
-	jsonOut := fs.Bool("json", false, "emit json")
-	if err := fs.Parse(reorderFlags(args, map[string]bool{
-		"--dir":  true,
-		"--json": false,
-	})); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-		return 1
-	}
-	if fs.NArg() != 1 {
-		fmt.Fprintf(stderr, "usage: %s bind-current [--dir PATH] [--json] <plan>\n", program)
-		return 1
-	}
-	store, err := Open(*dir)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	plan, err := resolvePlan(store, fs.Arg(0))
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	binding, err := store.BindCurrent(plan.ID)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	if *jsonOut {
-		return writeJSON(stdout, binding, stderr)
-	}
-	fmt.Fprintf(stdout, "Bound current session %s to plan %s (%s)\n", binding.SessionID, binding.PlanName, binding.PlanID)
-	if binding.CurrentTaskID != "" {
-		fmt.Fprintf(stdout, "Current task: %s %s\n", binding.CurrentTaskID, binding.CurrentTaskName)
-	}
 	return 0
 }
 
@@ -966,10 +865,7 @@ var commandHelpEntries = map[string]helpEntry{
 	},
 	"update": {
 		Summary: "Update plan metadata.",
-		Usage:   "update [--dir PATH] [--name TEXT] [--description TEXT] [--session-id ID] [--spec-path PATH] [--clear-sessions] [--json] <plan>",
-		Details: []string{
-			"Session IDs scope a plan to specific sessions when you want that metadata recorded on the plan.",
-		},
+		Usage:   "update [--dir PATH] [--name TEXT] [--description TEXT] [--spec-path PATH] [--json] <plan>",
 	},
 	"delete": {
 		Summary: "Delete a plan.",
@@ -991,7 +887,7 @@ var commandHelpEntries = map[string]helpEntry{
 	},
 	"update-task": {
 		Summary: "Update task status or metadata.",
-		Usage:   "update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--assigned-session ID] [--clear-assigned-session] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>",
+		Usage:   "update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--claimed-by ID] [--clear-claimed-by] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>",
 		Details: []string{
 			"Valid statuses: not_started, in_progress, blocked, complete, cancelled.",
 			"Setting --status complete archives the durable record into history/*.done.",
@@ -1014,32 +910,18 @@ var commandHelpEntries = map[string]helpEntry{
 	},
 	"next": {
 		Summary: "Select the next actionable task.",
-		Usage:   "next [--dir PATH] [--session ID] [--json] <plan>",
+		Usage:   "next [--dir PATH] [--by ID] [--json] <plan>",
 		Details: []string{
-			"With --session, prefers tasks already assigned to that session before unassigned ready work.",
-			"Without --session, selection is unscoped and does not infer a bound session.",
+			"With --by, prefers tasks already claimed by that agent before unclaimed ready work.",
+			"Without --by, selection is unscoped and only returns unclaimed ready work.",
 		},
 	},
 	"claim-next": {
-		Summary: "Claim the next actionable task for a session.",
-		Usage:   "claim-next [--dir PATH] --session ID [--json] <plan>",
+		Summary: "Claim the next actionable task.",
+		Usage:   "claim-next [--dir PATH] [--by ID] [--json] <plan>",
 		Details: []string{
 			"Claims through an exclusive .claim file and moves the task to in_progress.",
-		},
-	},
-	"bind-session": {
-		Summary: "Bind an explicit session ID to a plan.",
-		Usage:   "bind-session [--dir PATH] --session ID [--json] <plan>",
-		Details: []string{
-			"Preferred for agent workflows because the session identity is explicit.",
-		},
-	},
-	"bind-current": {
-		Summary: "Bind the current runtime session to a plan.",
-		Usage:   "bind-current [--dir PATH] [--json] <plan>",
-		Details: []string{
-			"Resolves the session from AGENT_DASHBOARD_SESSION_ID, then CODEX_THREAD_ID, then AGENT_SESSION_ID.",
-			"Use bind-session instead when the caller can pass a stable session ID explicitly.",
+			"When --by is omitted, the CLI derives a local claimer id from AGENT_PLAN_ASSIGNEE, AGENT_NAME, or USER@HOST.",
 		},
 	},
 	"install": {
@@ -1072,8 +954,6 @@ var commandHelpOrder = []string{
 	"ready",
 	"next",
 	"claim-next",
-	"bind-session",
-	"bind-current",
 	"install",
 	"mcp",
 }
@@ -1087,9 +967,6 @@ func printUsage(w io.Writer, program string) {
 	fmt.Fprintf(w, "\nEnvironment:\n")
 	fmt.Fprintf(w, "  AGENT_PLAN_DIR              Workspace root fallback when --dir is omitted.\n")
 	fmt.Fprintf(w, "  AGENT_PLAN_NONINTERACTIVE   Set to 1 to skip delete confirmation prompts.\n")
-	fmt.Fprintf(w, "  AGENT_DASHBOARD_SESSION_ID  First bind-current session source.\n")
-	fmt.Fprintf(w, "  CODEX_THREAD_ID             Second bind-current session source.\n")
-	fmt.Fprintf(w, "  AGENT_SESSION_ID            Third bind-current session source.\n")
 	fmt.Fprintf(w, "\nExamples:\n")
 	fmt.Fprintf(w, "  %s create \"API Plan\" --description \"Track parity work\" --json\n", program)
 	fmt.Fprintf(w, "  %s show c1ebfc53 --json\n", program)
@@ -1203,11 +1080,6 @@ func formatPlan(plan Plan, verbose bool) string {
 	}
 	if verbose {
 		lines = append(lines, "")
-		if len(plan.SessionIDs) == 0 {
-			lines = append(lines, "Session IDs: (none)")
-		} else {
-			lines = append(lines, fmt.Sprintf("Session IDs: %s", strings.Join(plan.SessionIDs, ", ")))
-		}
 		lines = append(lines, fmt.Sprintf("Version: %d", plan.Version))
 		lines = append(lines, fmt.Sprintf("Updated: %s", plan.UpdatedAt.Format(timeFormat)))
 	}
@@ -1316,12 +1188,12 @@ func taskPayload(plan *Plan, task TaskRecord) map[string]any {
 		}
 	}
 	return map[string]any{
-		"id":                  task.ID,
-		"name":                task.Name,
-		"status":              task.Status,
-		"assigned_session_id": emptyToNil(task.AssignedSessionID),
-		"depends_on":          append([]string(nil), task.DependsOn...),
-		"dependency_status":   dependencyStatus,
+		"id":                task.ID,
+		"name":              task.Name,
+		"status":            task.Status,
+		"claimed_by":        emptyToNil(task.ClaimedBy),
+		"depends_on":        append([]string(nil), task.DependsOn...),
+		"dependency_status": dependencyStatus,
 	}
 }
 

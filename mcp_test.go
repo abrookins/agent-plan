@@ -74,25 +74,17 @@ func TestMCPPlanLifecycle(t *testing.T) {
 	}
 
 	result = server.CallTool(context.Background(), "plan_update_task", map[string]any{
-		"plan":                plan.ID,
-		"task":                spec.ID,
-		"assigned_session_id": "sess-mcp",
+		"plan":       plan.ID,
+		"task":       spec.ID,
+		"claimed_by": "agent-mcp",
 	})
 	if result.IsError {
 		t.Fatalf("plan_update_task result = %#v", result)
 	}
 
-	result = server.CallTool(context.Background(), "plan_bind_session", map[string]any{
-		"plan":    plan.ID,
-		"session": "sess-mcp",
-	})
-	if result.IsError {
-		t.Fatalf("plan_bind_session result = %#v", result)
-	}
-
 	result = server.CallTool(context.Background(), "plan_claim_next", map[string]any{
-		"plan":    plan.ID,
-		"session": "sess-mcp",
+		"plan": plan.ID,
+		"by":   "agent-mcp",
 	})
 	if result.IsError {
 		t.Fatalf("plan_claim_next result = %#v", result)

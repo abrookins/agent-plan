@@ -1,17 +1,17 @@
 ---
 name: agent-plan
-description: Manage shared workspace plans with the agent-plan CLI and MCP server. Use when the user wants explicit shared planning, multi-agent coordination, machine-readable task state, or session-aware task claiming.
+description: Manage shared workspace plans with the agent-plan CLI and MCP server. Use when the user wants explicit shared planning, multi-agent coordination, machine-readable task state, or claim-aware task coordination.
 ---
 
 # agent-plan
 
 Use `agent-plan` when work should be tracked in a workspace-local
-`.agent-plan/` store that multiple agents or sessions can read and update.
+`.agent-plan/` store that multiple agents can read and update.
 
 ## When To Use It
 
 - The user explicitly wants a shared plan or task list.
-- Multiple agents or sessions need to coordinate work.
+- Multiple agents need to coordinate work.
 - The repo already contains a `.agent-plan/` directory.
 - You need JSON or MCP output for plan and task state.
 
@@ -45,21 +45,16 @@ agent-plan ready <plan-id> --json
 - Prefer `show --json` or `get --json` for a cold start on a known plan.
 - Prefer `ready --json` when you need actionable tasks only.
 
-### 3. Bind or claim session-specific work
+### 3. Coordinate claim-specific work
 
 ```bash
-agent-plan bind-session <plan-id> --session <session-id> --json
-agent-plan bind-current <plan-id> --json
-agent-plan next <plan-id> --session <session-id> --json
-agent-plan claim-next <plan-id> --session <session-id> --json
+agent-plan next <plan-id> --by <agent-id> --json
+agent-plan claim-next <plan-id> --by <agent-id> --json
 ```
 
-- Prefer `bind-session` when you can pass an explicit session ID.
-- Use `bind-current` only when the runtime already exposes one of
-  `AGENT_DASHBOARD_SESSION_ID`, `CODEX_THREAD_ID`, or `AGENT_SESSION_ID`.
 - Use `claim-next` when you need exclusive ownership before editing files.
-- Use `next --session <session-id>` when session affinity matters; plain
-  `next` does not infer a bound session.
+- Use `next --by <agent-id>` when claimer affinity matters; plain `next` does
+  not infer any external claimer context.
 
 ### 4. Update the plan as work changes
 
@@ -96,14 +91,12 @@ Primary MCP tools:
 - `plan_ready`
 - `plan_next`
 - `plan_claim_next`
-- `plan_bind_session`
-- `plan_bind_current`
 - `plan_install`
 
 ## Notes
 
 - Treat `tasks/*.md` and `history/*.done` as durable records.
-- Treat `tasks/*.claim`, `manifest.lock`, and `sessions/*.json` as coordination state.
+- Treat `tasks/*.claim` and `manifest.lock` as coordination state.
 - Prefer the CLI or MCP tools over editing `.agent-plan/` files by hand.
 - Use `agent-plan help <command>` or `agent-plan <command> --help` when you
   need command-specific flag or environment details.

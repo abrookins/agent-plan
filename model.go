@@ -79,23 +79,22 @@ func (p *Plan) ReadyTasks() []TaskRecord {
 	return ready
 }
 
-func (p *Plan) SelectNextTask(sessionID string) *TaskRecord {
+func (p *Plan) SelectNextTask(claimedBy string) *TaskRecord {
 	ready := p.ReadyTasks()
 	if len(ready) == 0 {
 		return nil
 	}
-	if strings.TrimSpace(sessionID) == "" {
-		task := ready[0]
-		return &task
-	}
-	for _, task := range ready {
-		if task.AssignedSessionID == sessionID {
-			copy := task
-			return &copy
+	claimer := strings.TrimSpace(claimedBy)
+	if claimer != "" {
+		for _, task := range ready {
+			if task.ClaimedBy == claimer {
+				copy := task
+				return &copy
+			}
 		}
 	}
 	for _, task := range ready {
-		if task.AssignedSessionID == "" {
+		if task.ClaimedBy == "" {
 			copy := task
 			return &copy
 		}
@@ -288,11 +287,6 @@ func (p *Plan) ApplyPlanUpdate(opts PlanUpdateOptions) {
 	if opts.SpecPath != nil {
 		p.SpecPath = strings.TrimSpace(*opts.SpecPath)
 	}
-	if opts.ClearSessions {
-		p.SessionIDs = nil
-	} else if opts.SessionIDs != nil {
-		p.SessionIDs = normalizeIDs(opts.SessionIDs)
-	}
 	p.touch()
 }
 
@@ -325,10 +319,20 @@ func (p *Plan) ApplyTaskUpdate(taskID string, opts TaskUpdateOptions) (*TaskReco
 	if opts.Description != nil {
 		task.Description = *opts.Description
 	}
-	if opts.ClearAssignedSession {
-		task.AssignedSessionID = ""
-	} else if opts.AssignedSessionID != nil {
-		task.AssignedSessionID = strings.TrimSpace(*opts.AssignedSessionID)
+	if opts.ClearClaimedBy {
+		task.ClaimedBy = ""
+		task.Assignee = ""
+		task.ClaimedAt = nil
+	} else if opts.ClaimedBy != nil {
+		claimer := strings.TrimSpace(*opts.ClaimedBy)
+		task.ClaimedBy = claimer
+		task.Assignee = claimer
+		if claimer == "" {
+			task.ClaimedAt = nil
+		} else if task.ClaimedAt == nil {
+			now := time.Now().UTC()
+			task.ClaimedAt = &now
+		}
 	}
 	if opts.ClearDependencies {
 		task.DependsOn = nil

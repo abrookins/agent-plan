@@ -19,7 +19,6 @@ import (
 const (
 	metaDirName        = ".agent-plan"
 	plansDirName       = "plans"
-	sessionsDirName    = "sessions"
 	workspaceFileName  = "workspace.json"
 	workspaceLockName  = "workspace.lock"
 	planFileName       = "plan.json"
@@ -57,12 +56,6 @@ var (
 	ErrTaskNotFound       = errors.New("task not found")
 	ErrTaskAlreadyClaimed = errors.New("task is already claimed")
 )
-
-var currentSessionEnvKeys = []string{
-	"AGENT_DASHBOARD_SESSION_ID",
-	"CODEX_THREAD_ID",
-	"AGENT_SESSION_ID",
-}
 
 type exclusiveFile interface {
 	Write([]byte) (int, error)
@@ -211,7 +204,6 @@ func (s *Store) ListPlans() ([]PlanSummary, error) {
 			Name:          planRecord.Name,
 			Description:   planRecord.Description,
 			SpecPath:      planRecord.SpecPath,
-			SessionIDs:    append([]string(nil), planRecord.SessionIDs...),
 			TaskCount:     len(manifest.Tasks),
 			CompleteCount: complete,
 			UpdatedAt:     planRecord.UpdatedAt,
@@ -258,9 +250,6 @@ func (s *Store) DeletePlan(planID string) (bool, error) {
 			return err
 		}
 		if err := removeAllFunc(s.planDir(planID)); err != nil {
-			return err
-		}
-		if err := s.removeBindingsForPlan(planID); err != nil {
 			return err
 		}
 		removed = true
@@ -373,27 +362,27 @@ func (s *Store) Ready(planID string) ([]TaskRecord, error) {
 	return plan.ReadyTasks(), nil
 }
 
-func (s *Store) NextTask(planID, sessionID string) (*TaskRecord, error) {
+func (s *Store) NextTask(planID, claimedBy string) (*TaskRecord, error) {
 	plan, _, err := s.loadPlan(planID)
 	if err != nil {
 		return nil, err
 	}
-	return plan.SelectNextTask(strings.TrimSpace(sessionID)), nil
+	return plan.SelectNextTask(strings.TrimSpace(claimedBy)), nil
 }
 
 func (s *Store) ClaimTask(planID, taskID, by string) (*TaskRecord, error) {
-	return s.claimTask(planID, taskID, by, "")
+	return s.claimTask(planID, taskID, by)
 }
 
-func (s *Store) ClaimNext(planID, sessionID string) (*TaskRecord, error) {
-	sessionID = strings.TrimSpace(sessionID)
+func (s *Store) ClaimNext(planID, by string) (*TaskRecord, error) {
+	by = strings.TrimSpace(by)
 	var claimed *TaskRecord
 	err := s.withPlanLock(planID, func() error {
 		plan, manifest, err := s.loadPlan(planID)
 		if err != nil {
 			return err
 		}
-		task := plan.SelectNextTask(sessionID)
+		task := plan.SelectNextTask(by)
 		if task == nil {
 			return nil
 		}
@@ -401,12 +390,13 @@ func (s *Store) ClaimNext(planID, sessionID string) (*TaskRecord, error) {
 		if current == nil {
 			return ErrTaskNotFound
 		}
-		if sessionID != "" {
-			current.AssignedSessionID = sessionID
-		}
-		by := sessionID
 		if by == "" {
 			by = defaultActor()
+		}
+		if current.ClaimedBy == by {
+			copy := *current
+			claimed = &copy
+			return nil
 		}
 		claimPath := s.claimPath(planID, current.ID)
 		claim, err := createClaim(claimPath, by)
@@ -432,75 +422,7 @@ func (s *Store) ClaimNext(planID, sessionID string) (*TaskRecord, error) {
 	return claimed, nil
 }
 
-func (s *Store) BindSession(planID, sessionID string) (*SessionBinding, error) {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" {
-		return nil, fmt.Errorf("session id is required")
-	}
-	var binding *SessionBinding
-	err := s.withWorkspaceLock(func() error {
-		plan, manifest, err := s.loadPlan(planID)
-		if err != nil {
-			return err
-		}
-		if !containsID(plan.SessionIDs, sessionID) {
-			plan.SessionIDs = append(plan.SessionIDs, sessionID)
-			plan.touch()
-			if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
-				return err
-			}
-		}
-		if err := s.removeSessionFromOtherPlans(plan.ID, sessionID); err != nil {
-			return err
-		}
-		currentTask := firstAssignedTask(plan, sessionID)
-		payload := &SessionBinding{
-			SessionID: sessionID,
-			PlanID:    plan.ID,
-			PlanName:  plan.Name,
-			UpdatedAt: time.Now().UTC(),
-		}
-		if currentTask != nil {
-			payload.CurrentTaskID = currentTask.ID
-			payload.CurrentTaskName = currentTask.Name
-			payload.ClaimedAt = currentTask.ClaimedAt
-		}
-		if err := s.saveSessionBinding(payload); err != nil {
-			return err
-		}
-		binding = payload
-		return nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return binding, nil
-}
-
-func (s *Store) BindCurrent(planID string) (*SessionBinding, error) {
-	sessionID := resolveCurrentSessionID()
-	if sessionID == "" {
-		return nil, fmt.Errorf("no current session env was found; set one of %s or use bind-session --session <id>", strings.Join(currentSessionEnvKeys, ", "))
-	}
-	return s.BindSession(planID, sessionID)
-}
-
-func (s *Store) GetSessionBinding(sessionID string) (*SessionBinding, error) {
-	data, err := readFileFunc(s.sessionBindingPath(sessionID))
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	var binding SessionBinding
-	if err := json.Unmarshal(data, &binding); err != nil {
-		return nil, err
-	}
-	return &binding, nil
-}
-
-func (s *Store) claimTask(planID, taskID, by, assignedSessionID string) (*TaskRecord, error) {
+func (s *Store) claimTask(planID, taskID, by string) (*TaskRecord, error) {
 	by = strings.TrimSpace(by)
 	if by == "" {
 		by = defaultActor()
@@ -531,9 +453,6 @@ func (s *Store) claimTask(planID, taskID, by, assignedSessionID string) (*TaskRe
 		task.ClaimedAt = &now
 		task.Status = StatusInProgress
 		task.UpdatedAt = now
-		if assignedSessionID != "" {
-			task.AssignedSessionID = assignedSessionID
-		}
 		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
 			return err
 		}
@@ -577,7 +496,6 @@ func (s *Store) persistPlanLocked(plan *Plan, manifest *Manifest, _ map[string]T
 		Name:        plan.Name,
 		Description: plan.Description,
 		SpecPath:    strings.TrimSpace(plan.SpecPath),
-		SessionIDs:  normalizeIDs(plan.SessionIDs),
 		CreatedAt:   plan.CreatedAt.UTC(),
 		UpdatedAt:   plan.UpdatedAt.UTC(),
 		Version:     plan.Version,
@@ -591,10 +509,6 @@ func (s *Store) persistPlanLocked(plan *Plan, manifest *Manifest, _ map[string]T
 	if err := mkdirAllFunc(s.planHistoryDir(plan.ID), defaultDirPerm); err != nil {
 		return err
 	}
-	if err := mkdirAllFunc(s.sessionsDir(), defaultDirPerm); err != nil {
-		return err
-	}
-
 	current := map[string]TaskSummary{}
 	manifest.Tasks = manifest.Tasks[:0]
 	sortTasks(plan.Tasks)
@@ -725,7 +639,6 @@ func (s *Store) loadPlan(planID string) (*Plan, *Manifest, error) {
 		Description: record.Description,
 		SpecPath:    record.SpecPath,
 		Tasks:       records,
-		SessionIDs:  append([]string(nil), record.SessionIDs...),
 		CreatedAt:   record.CreatedAt.UTC(),
 		UpdatedAt:   record.UpdatedAt.UTC(),
 		Version:     record.Version,
@@ -776,9 +689,6 @@ func (s *Store) ensureWorkspaceLocked() error {
 	if err := mkdirAllFunc(s.plansDir(), defaultDirPerm); err != nil {
 		return err
 	}
-	if err := mkdirAllFunc(s.sessionsDir(), defaultDirPerm); err != nil {
-		return err
-	}
 	if _, err := statFunc(s.workspacePath()); err == nil {
 		return nil
 	} else if !errors.Is(err, os.ErrNotExist) {
@@ -817,69 +727,6 @@ func (s *Store) saveWorkspace(workspace Workspace) error {
 		return err
 	}
 	return atomicWriteJSON(s.workspacePath(), workspace)
-}
-
-func (s *Store) removeSessionFromOtherPlans(planID, sessionID string) error {
-	plans, err := s.ListPlans()
-	if err != nil {
-		return err
-	}
-	for _, summary := range plans {
-		if summary.ID == planID || !containsID(summary.SessionIDs, sessionID) {
-			continue
-		}
-		currentPlan, manifest, err := s.loadPlan(summary.ID)
-		if err != nil {
-			return err
-		}
-		filtered := make([]string, 0, len(currentPlan.SessionIDs))
-		for _, candidate := range currentPlan.SessionIDs {
-			if candidate != sessionID {
-				filtered = append(filtered, candidate)
-			}
-		}
-		currentPlan.SessionIDs = filtered
-		currentPlan.touch()
-		if err := s.persistPlanLocked(currentPlan, manifest, nil); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Store) removeBindingsForPlan(planID string) error {
-	entries, err := readDirFunc(s.sessionsDir())
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		return err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		path := filepath.Join(s.sessionsDir(), entry.Name())
-		data, err := readFileFunc(path)
-		if err != nil {
-			return err
-		}
-		var binding SessionBinding
-		if err := json.Unmarshal(data, &binding); err != nil {
-			return err
-		}
-		if binding.PlanID != planID {
-			continue
-		}
-		if err := removeFileFunc(path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-	}
-	return nil
-}
-
-func (s *Store) saveSessionBinding(binding *SessionBinding) error {
-	return atomicWriteJSON(s.sessionBindingPath(binding.SessionID), binding)
 }
 
 func (s *Store) readTaskRecord(path string) (TaskRecord, error) {
@@ -1102,7 +949,6 @@ func summaryFromRecord(record TaskRecord) TaskSummary {
 		Status:             record.Status,
 		Order:              record.Order,
 		ParentID:           record.ParentID,
-		AssignedSessionID:  record.AssignedSessionID,
 		DependsOn:          normalizeIDs(record.DependsOn),
 		Assignee:           record.Assignee,
 		BlockedReason:      record.BlockedReason,
@@ -1175,38 +1021,6 @@ func randomID() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-func resolveCurrentSessionID() string {
-	for _, key := range currentSessionEnvKeys {
-		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func firstAssignedTask(plan *Plan, sessionID string) *TaskRecord {
-	for _, task := range plan.IterTasksInDisplayOrder() {
-		if task.AssignedSessionID != sessionID {
-			continue
-		}
-		if task.Status == StatusComplete || task.Status == StatusCancelled {
-			continue
-		}
-		copy := task
-		return &copy
-	}
-	return nil
-}
-
-func containsID(values []string, candidate string) bool {
-	for _, value := range values {
-		if value == candidate {
-			return true
-		}
-	}
-	return false
-}
-
 func maxSequence(tasks []TaskRecord) int {
 	max := 0
 	for _, task := range tasks {
@@ -1260,8 +1074,6 @@ func defaultActor() string {
 	for _, key := range []string{
 		"AGENT_PLAN_ASSIGNEE",
 		"AGENT_NAME",
-		"AGENT_DASHBOARD_SESSION_ID",
-		"CODEX_THREAD_ID",
 		"AGENT_SESSION_ID",
 	} {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
@@ -1292,7 +1104,6 @@ func taskPathForStatus(id string, status Status) string {
 func (s *Store) workspacePath() string        { return filepath.Join(s.MetaDir, workspaceFileName) }
 func (s *Store) workspaceLockPath() string    { return filepath.Join(s.MetaDir, workspaceLockName) }
 func (s *Store) plansDir() string             { return filepath.Join(s.MetaDir, plansDirName) }
-func (s *Store) sessionsDir() string          { return filepath.Join(s.MetaDir, sessionsDirName) }
 func (s *Store) planDir(planID string) string { return filepath.Join(s.plansDir(), planID) }
 func (s *Store) planInfoPath(planID string) string {
 	return filepath.Join(s.planDir(planID), planFileName)
@@ -1323,7 +1134,4 @@ func (s *Store) taskFilePath(planID, id string, status Status) string {
 		return s.historyPath(planID, id)
 	}
 	return s.taskPath(planID, id)
-}
-func (s *Store) sessionBindingPath(sessionID string) string {
-	return filepath.Join(s.sessionsDir(), sessionID+".json")
 }

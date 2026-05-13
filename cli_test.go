@@ -80,20 +80,13 @@ func TestCLIPlanCommandsAndFlagReordering(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 
-	t.Setenv("AGENT_SESSION_ID", "sess-cli")
-	if code := runCLI(context.Background(), "agent-plan", []string{"bind-current", "--dir", root, "--json", created.ID}, strings.NewReader(""), &stdout, &stderr); code != 0 {
-		t.Fatalf("bind-current code = %d stderr=%s", code, stderr.String())
-	}
-	stdout.Reset()
-	stderr.Reset()
-
-	if code := runCLI(context.Background(), "agent-plan", []string{"update-task", "--dir", root, created.ID, design.ID, "--assigned-session", "sess-cli", "--status", "in_progress", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+	if code := runCLI(context.Background(), "agent-plan", []string{"update-task", "--dir", root, created.ID, design.ID, "--claimed-by", "agent-cli", "--status", "in_progress", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("update-task code = %d stderr=%s", code, stderr.String())
 	}
 	stdout.Reset()
 	stderr.Reset()
 
-	if code := runCLI(context.Background(), "agent-plan", []string{"next", "--dir", root, created.ID, "--session", "sess-cli", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+	if code := runCLI(context.Background(), "agent-plan", []string{"next", "--dir", root, created.ID, "--by", "agent-cli", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("next code = %d stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), design.ID) {
@@ -102,7 +95,7 @@ func TestCLIPlanCommandsAndFlagReordering(t *testing.T) {
 	stdout.Reset()
 	stderr.Reset()
 
-	if code := runCLI(context.Background(), "agent-plan", []string{"claim-next", "--dir", root, created.ID, "--session", "sess-cli", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+	if code := runCLI(context.Background(), "agent-plan", []string{"claim-next", "--dir", root, created.ID, "--by", "agent-cli", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("claim-next code = %d stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), design.ID) {
@@ -177,6 +170,8 @@ func TestCLIRemovesImplicitPlanCommands(t *testing.T) {
 		{"done", "--dir", root, "001-task"},
 		{"block", "--dir", root, "001-task", "--reason", "blocked"},
 		{"list-tasks", "--dir", root},
+		{"next", "--dir", root, "plan", "--session", "sess"},
+		{"bind-current", "--dir", root, "plan"},
 		{"plan", "show", "--dir", root},
 	} {
 		stdout.Reset()
@@ -184,7 +179,9 @@ func TestCLIRemovesImplicitPlanCommands(t *testing.T) {
 		if code := runCLI(context.Background(), "agent-plan", args, strings.NewReader(""), &stdout, &stderr); code != 1 {
 			t.Fatalf("%v code = %d stderr=%s", args, code, stderr.String())
 		}
-		if !strings.Contains(stderr.String(), "unknown command") && !strings.Contains(stderr.String(), "usage: agent-plan plan show") {
+		if !strings.Contains(stderr.String(), "unknown command") &&
+			!strings.Contains(stderr.String(), "usage: agent-plan plan show") &&
+			!strings.Contains(stderr.String(), "flag provided but not defined") {
 			t.Fatalf("%v stderr = %q", args, stderr.String())
 		}
 	}
@@ -284,7 +281,7 @@ func TestCLIConfirmDeleteAndErrorPaths(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := runCLI(context.Background(), "agent-plan", []string{"claim-next", "--dir", root, planID, "--session", "sess"}, strings.NewReader(""), &stdout, &stderr); code != 1 {
+	if code := runCLI(context.Background(), "agent-plan", []string{"claim-next", "--dir", root, planID, "--by", "agent-test"}, strings.NewReader(""), &stdout, &stderr); code != 1 {
 		t.Fatalf("claim-next empty code = %d stderr=%s", code, stderr.String())
 	}
 
@@ -403,15 +400,6 @@ func TestCLIHelpTextIsMeaningful(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "AGENT_PLAN_DIR") || !strings.Contains(stdout.String(), "show") {
 		t.Fatalf("help stdout = %q", stdout.String())
-	}
-
-	stdout.Reset()
-	stderr.Reset()
-	if code := runCLI(context.Background(), "agent-plan", []string{"bind-current", "--help"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
-		t.Fatalf("bind-current --help code = %d stderr=%s", code, stderr.String())
-	}
-	if !strings.Contains(stdout.String(), "AGENT_DASHBOARD_SESSION_ID") || !strings.Contains(stdout.String(), "bind-session instead") {
-		t.Fatalf("bind-current help stdout = %q", stdout.String())
 	}
 
 	stdout.Reset()

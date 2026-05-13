@@ -11,12 +11,11 @@ The Go implementation should mirror the Python tool's user-facing capabilities:
 - explicit whole-plan snapshot: `show`
 - task operations: `add-task`, `update-task`, `delete-task`
 - task coordination helpers: `ready`, `next`, `claim-next`
-- session helpers: `bind-session`, `bind-current`
 - guidance installation: `install AGENTS.md|CLAUDE.md|skill`
 - MCP tools for the same plan and task workflows
 
 The Go implementation does not need to copy the Python storage backend or rely
-on any external session-management runtime.
+on any external coordination runtime.
 
 ## Design Constraints
 
@@ -25,16 +24,13 @@ on any external session-management runtime.
   primitive.
 - Task files remain the durable source of truth.
 - Completed work remains archived in `history/`.
-- The tool must not assume any external coordinator. Session binding is
-  represented as local filesystem metadata.
+- The tool must not assume any external coordinator for plan binding or claim ownership.
 
 ## Filesystem Layout
 
 ```text
 .agent-plan/
   workspace.json
-  sessions/
-    <session-id>.json
   plans/
     <plan-id>/
       plan.json
@@ -50,10 +46,8 @@ on any external session-management runtime.
 Notes:
 
 - `workspace.json` tracks store version and workspace-level metadata.
-- `plan.json` stores plan metadata such as `name`, `description`, `spec_path`,
-  and scoped `session_ids`.
+- `plan.json` stores plan metadata such as `name`, `description`, and `spec_path`.
 - `manifest.json` stores the task summary index for a single plan.
-- `sessions/<session-id>.json` stores local session-to-plan binding metadata.
 
 ## Compatibility Strategy
 
@@ -73,8 +67,6 @@ The Go CLI should support the Python command set directly:
 - `agent-plan ready`
 - `agent-plan next`
 - `agent-plan claim-next`
-- `agent-plan bind-session`
-- `agent-plan bind-current`
 - `agent-plan install`
 
 ### Go command surface
@@ -94,8 +86,6 @@ The Go CLI should keep a single explicit surface:
 - `ready`
 - `next`
 - `claim-next`
-- `bind-session`
-- `bind-current`
 - `install`
 - `mcp`
 
@@ -104,20 +94,14 @@ The Go CLI should keep a single explicit surface:
 The Go repo does not preserve the legacy single-plan layout. A workspace must
 be initialized into the current multi-plan structure before it can be used.
 
-## Session Semantics
+## Claim Semantics
 
-The Python version binds sessions through a separate runtime store. The Go repo
-stores local session binding snapshots instead.
-
-- `bind-session` writes `.agent-plan/sessions/<session-id>.json`
-- `bind-current` resolves the current session from `AGENT_DASHBOARD_SESSION_ID`,
-  then `CODEX_THREAD_ID`, then `AGENT_SESSION_ID`, and writes the same binding file
-- `claim-next --session <id>` both assigns the task to the session and claims it
-  through the normal `.claim` file path
-- `next --session <id>` prefers tasks already assigned to that session before
-  considering unassigned ready tasks
-- plain `next` does not infer a bound session and should be treated as an
-  unscoped selection helper
+- `claim-next --by <id>` records the claimer and claims the task through the
+  normal `.claim` file path
+- `next --by <id>` prefers tasks already claimed by that agent before
+  considering unclaimed ready tasks
+- plain `next` does not infer any external claimer context and should be
+  treated as an unscoped selection helper
 
 ## Resolution And Environment Semantics
 
@@ -150,6 +134,4 @@ The MCP server should expose the full plan surface with machine-readable outputs
 - `plan_ready`
 - `plan_next`
 - `plan_claim_next`
-- `plan_bind_session`
-- `plan_bind_current`
 - `plan_install`
