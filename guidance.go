@@ -110,6 +110,11 @@ func buildClaudeGuidance() string {
 
 func buildPlanManagementSkill() string {
 	return strings.TrimSpace(`
+---
+name: agent-plan-management
+description: Use when a prompt references a shared plan, task list, or explicit plan_id and the agent should coordinate work through the agent-plan CLI.
+---
+
 # agent-plan-management
 
 Use this skill when a prompt references a shared plan, task list, or explicit ` + "`plan_id`" + `.

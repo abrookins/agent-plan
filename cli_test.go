@@ -322,8 +322,16 @@ func TestInstallWritesWorkspaceFiles(t *testing.T) {
 	if !strings.Contains(stdout.String(), "SKILL.md") {
 		t.Fatalf("stdout = %q", stdout.String())
 	}
-	if _, err := os.Stat(filepath.Join(workspace, ".codex", "skills", planManagementSkillSlug, "SKILL.md")); err != nil {
+	skillPath := filepath.Join(workspace, ".codex", "skills", planManagementSkillSlug, "SKILL.md")
+	if _, err := os.Stat(skillPath); err != nil {
 		t.Fatalf("workspace skill missing: %v", err)
+	}
+	data, err := os.ReadFile(skillPath)
+	if err != nil {
+		t.Fatalf("ReadFile(skill) error = %v", err)
+	}
+	if !strings.HasPrefix(string(data), "---\n") {
+		t.Fatalf("skill missing frontmatter: %q", string(data))
 	}
 }
 

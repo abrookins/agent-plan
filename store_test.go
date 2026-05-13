@@ -257,6 +257,13 @@ func TestStoreHelpersAndGuidance(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("skill not written: %v", err)
 	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(skill) error = %v", err)
+	}
+	if !strings.HasPrefix(string(data), "---\n") {
+		t.Fatalf("skill = %q", string(data))
+	}
 	if _, err := InstallGuidance("bad", false, repo); err == nil {
 		t.Fatal("InstallGuidance(bad) should fail")
 	}
