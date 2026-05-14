@@ -419,3 +419,24 @@ func TestCLIHelpTextIsMeaningful(t *testing.T) {
 		t.Fatalf("update-task help stdout = %q", stdout.String())
 	}
 }
+
+func TestCLIVersion(t *testing.T) {
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"version"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("version code = %d stderr=%s", code, stderr.String())
+	}
+	if strings.TrimSpace(stdout.String()) != "agent-plan "+Version {
+		t.Fatalf("version stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCLI(context.Background(), "agent-plan", []string{"--version", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("--version --json code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"version": "`+Version+`"`) {
+		t.Fatalf("--version --json stdout = %q", stdout.String())
+	}
+}

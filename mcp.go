@@ -23,7 +23,7 @@ func (s *MCPServer) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 	server := &mcpproto.Server{
 		ProtocolVersion: protocolVersion,
 		Name:            "agent-plan",
-		Version:         "0.3.0",
+		Version:         Version,
 		Instructions:    "Filesystem-backed shared plan management over workspace-local .agent-plan directories.",
 		Provider:        s,
 	}

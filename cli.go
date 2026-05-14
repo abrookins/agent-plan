@@ -46,6 +46,8 @@ func runCLI(ctx context.Context, program string, args []string, stdin io.Reader,
 		}
 		printUsage(stdout, program)
 		return 0
+	case "version", "-v", "--version":
+		return runVersion(program, stdout, stderr, args[1:])
 	case "init":
 		return runInit(program, stdout, stderr, args[1:])
 	case "create":
@@ -85,6 +87,28 @@ func runCLI(ctx context.Context, program string, args []string, stdin io.Reader,
 		printUsage(stderr, program)
 		return 1
 	}
+}
+
+func runVersion(program string, stdout, stderr io.Writer, args []string) int {
+	fs := newCommandFlagSet("version", program, stderr)
+	jsonOut := fs.Bool("json", false, "emit json")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{
+		"--json": false,
+	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "usage: %s version [--json]\n", program)
+		return 1
+	}
+	if *jsonOut {
+		return writeJSON(stdout, map[string]string{"version": Version}, stderr)
+	}
+	fmt.Fprintf(stdout, "%s %s\n", program, Version)
+	return 0
 }
 
 func runInit(_ string, stdout, stderr io.Writer, args []string) int {
@@ -938,6 +962,13 @@ var commandHelpEntries = map[string]helpEntry{
 			"Exposes the same plan workflow over MCP tools such as plan_show, plan_update_task, and plan_claim_next.",
 		},
 	},
+	"version": {
+		Summary: "Print the agent-plan version.",
+		Usage:   "version [--json]",
+		Details: []string{
+			"Prints the same version advertised by the MCP server.",
+		},
+	},
 }
 
 var commandHelpOrder = []string{
@@ -956,6 +987,7 @@ var commandHelpOrder = []string{
 	"claim-next",
 	"install",
 	"mcp",
+	"version",
 }
 
 func printUsage(w io.Writer, program string) {

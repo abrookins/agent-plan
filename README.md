@@ -109,6 +109,7 @@ agent-plan next <plan-id> --by <agent-id> --json
 agent-plan claim-next <plan-id> --by <agent-id> --json
 agent-plan install AGENTS.md
 agent-plan mcp
+agent-plan version
 ```
 
 `show` is the explicit whole-plan snapshot command for agents that want the
