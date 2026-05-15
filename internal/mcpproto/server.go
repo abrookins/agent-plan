@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"strconv"
 	"strings"
 )
 
@@ -176,43 +175,24 @@ func (s *Server) HandleRequest(ctx context.Context, req Request) *Response {
 }
 
 func ReadFrame(r frameReader) ([]byte, error) {
-	contentLength := -1
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
 			if errors.Is(err, io.EOF) && line == "" {
 				return nil, io.EOF
 			}
-			return nil, err
-		}
-
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			if contentLength >= 0 {
-				break
+			if errors.Is(err, io.EOF) {
+				payload := strings.TrimRight(line, "\r\n")
+				if strings.TrimSpace(payload) == "" {
+					return nil, io.EOF
+				}
+				return []byte(payload), nil
 			}
-			continue
-		}
-
-		parts := strings.SplitN(trimmed, ":", 2)
-		if len(parts) != 2 {
-			continue
-		}
-		if !strings.EqualFold(strings.TrimSpace(parts[0]), "Content-Length") {
-			continue
-		}
-		length, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-		if err != nil {
 			return nil, err
 		}
-		contentLength = length
-	}
 
-	payload := make([]byte, contentLength)
-	if _, err := io.ReadFull(r, payload); err != nil {
-		return nil, err
+		return []byte(strings.TrimRight(line, "\r\n")), nil
 	}
-	return payload, nil
 }
 
 func WriteFrame(w frameWriter, resp Response) error {
@@ -220,10 +200,10 @@ func WriteFrame(w frameWriter, resp Response) error {
 	if err != nil {
 		return err
 	}
-	if _, err := w.WriteString("Content-Length: " + strconv.Itoa(len(payload)) + "\r\n\r\n"); err != nil {
+	if _, err := w.Write(payload); err != nil {
 		return err
 	}
-	if _, err := w.Write(payload); err != nil {
+	if _, err := w.WriteString("\n"); err != nil {
 		return err
 	}
 	return nil

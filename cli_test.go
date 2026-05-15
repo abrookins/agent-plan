@@ -387,6 +387,35 @@ func TestCLISupportsShowAndEnvDirFallback(t *testing.T) {
 	}
 }
 
+func TestMCPCommandUsesNewlineDelimitedMessages(t *testing.T) {
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+	input := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"qa","version":"1"}}}` + "\n"
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"mcp"}, strings.NewReader(input), &stdout, &stderr); code != 0 {
+		t.Fatalf("mcp code = %d stderr=%s", code, stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Content-Length:") {
+		t.Fatalf("mcp stdout should be newline-delimited, got %q", stdout.String())
+	}
+	line := strings.TrimSpace(stdout.String())
+	var resp struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      int    `json:"id"`
+		Result  struct {
+			ServerInfo struct {
+				Name string `json:"name"`
+			} `json:"serverInfo"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal([]byte(line), &resp); err != nil {
+		t.Fatalf("Unmarshal(mcp response) error = %v stdout=%q", err, stdout.String())
+	}
+	if resp.JSONRPC != "2.0" || resp.ID != 1 || resp.Result.ServerInfo.Name != "agent-plan" {
+		t.Fatalf("mcp response = %#v", resp)
+	}
+}
+
 func TestMCPCommandRejectsExtraArgs(t *testing.T) {
 	stdout := bytes.Buffer{}
 	stderr := bytes.Buffer{}

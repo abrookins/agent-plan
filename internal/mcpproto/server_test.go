@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -29,30 +28,20 @@ type errWriter struct{ err error }
 
 func (w errWriter) Write(_ []byte) (int, error) { return 0, w.err }
 
-type secondWriteErrWriter struct {
-	writes int
-}
-
-func (w *secondWriteErrWriter) Write(p []byte) (int, error) {
-	w.writes++
-	if w.writes >= 2 {
-		return 0, io.ErrClosedPipe
-	}
-	return len(p), nil
-}
-
 type payloadErrFrameWriter struct{}
 
 func (payloadErrFrameWriter) WriteString(string) (int, error) { return 1, nil }
 func (payloadErrFrameWriter) Write([]byte) (int, error)       { return 0, io.ErrClosedPipe }
 func (payloadErrFrameWriter) Flush() error                    { return nil }
 
-func frame(body string) string {
-	return "Content-Length: " + strconvItoa(len(body)) + "\r\n\r\n" + body
-}
+type newlineErrFrameWriter struct{}
 
-func strconvItoa(n int) string {
-	return strings.TrimSpace(string([]byte(fmt.Sprintf("%d", n))))
+func (newlineErrFrameWriter) Write(p []byte) (int, error)     { return len(p), nil }
+func (newlineErrFrameWriter) WriteString(string) (int, error) { return 0, io.ErrClosedPipe }
+func (newlineErrFrameWriter) Flush() error                    { return nil }
+
+func frame(body string) string {
+	return body + "\n"
 }
 
 func TestHandleRequestBranches(t *testing.T) {
@@ -123,22 +112,9 @@ func TestReadFrameAndWriteFrame(t *testing.T) {
 		t.Fatalf("ReadFrame() payload=%q err=%v", string(payload), err)
 	}
 
-	if _, err := ReadFrame(bufio.NewReader(strings.NewReader("Content-Length: nope\r\n\r\n"))); err == nil {
-		t.Fatal("ReadFrame() should fail on invalid content length")
-	}
-	if _, err := ReadFrame(bufio.NewReader(strings.NewReader("Content-Length: 10\r\n\r\n123"))); err == nil {
-		t.Fatal("ReadFrame() should fail on short body")
-	}
-	withIgnoredHeader := "X-Test: 1\r\nContent-Length: 4\r\n\r\nping"
-	if payload, err := ReadFrame(bufio.NewReader(strings.NewReader(withIgnoredHeader))); err != nil || string(payload) != "ping" {
-		t.Fatalf("ReadFrame(withIgnoredHeader) payload=%q err=%v", string(payload), err)
-	}
-	withBlankAndMalformedHeader := "\r\nNoColon\r\nContent-Length: 4\r\n\r\npong"
-	if payload, err := ReadFrame(bufio.NewReader(strings.NewReader(withBlankAndMalformedHeader))); err != nil || string(payload) != "pong" {
-		t.Fatalf("ReadFrame(withBlankAndMalformedHeader) payload=%q err=%v", string(payload), err)
-	}
-	if _, err := ReadFrame(bufio.NewReader(strings.NewReader("Content-Length: 4"))); err == nil {
-		t.Fatal("ReadFrame() should fail on partial header line")
+	payload, err = ReadFrame(bufio.NewReader(strings.NewReader(body)))
+	if err != nil || string(payload) != body {
+		t.Fatalf("ReadFrame(final line) payload=%q err=%v", string(payload), err)
 	}
 	if _, err := ReadFrame(bufio.NewReader(strings.NewReader(""))); !errors.Is(err, io.EOF) {
 		t.Fatalf("ReadFrame() err = %v, want EOF", err)
@@ -152,18 +128,22 @@ func TestReadFrameAndWriteFrame(t *testing.T) {
 	if err := writer.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}
-	if !strings.Contains(buffer.String(), "Content-Length:") {
+	if strings.Contains(buffer.String(), "Content-Length:") || !strings.HasSuffix(buffer.String(), "\n") {
 		t.Fatalf("buffer = %q", buffer.String())
+	}
+	var resp Response
+	if err := json.Unmarshal([]byte(strings.TrimSpace(buffer.String())), &resp); err != nil {
+		t.Fatalf("json.Unmarshal(written response) error = %v", err)
 	}
 
 	if err := WriteFrame(bufio.NewWriterSize(errWriter{err: io.ErrClosedPipe}, 1), Response{JSONRPC: "2.0", Result: strings.Repeat("x", 32)}); err == nil {
 		t.Fatal("WriteFrame() should fail when writer fails")
 	}
-	if err := WriteFrame(bufio.NewWriterSize(&secondWriteErrWriter{}, 1), Response{JSONRPC: "2.0", Result: strings.Repeat("x", 64)}); err == nil {
-		t.Fatal("WriteFrame() should fail when second write fails")
-	}
 	if err := WriteFrame(payloadErrFrameWriter{}, Response{JSONRPC: "2.0", Result: map[string]string{"ok": "1"}}); err == nil {
 		t.Fatal("WriteFrame() should fail when payload write fails")
+	}
+	if err := WriteFrame(newlineErrFrameWriter{}, Response{JSONRPC: "2.0", Result: map[string]string{"ok": "1"}}); err == nil {
+		t.Fatal("WriteFrame() should fail when newline write fails")
 	}
 	if err := WriteFrame(bufio.NewWriter(io.Discard), Response{JSONRPC: "2.0", Result: func() {}}); err == nil {
 		t.Fatal("WriteFrame() should fail on unsupported JSON payload")
@@ -213,9 +193,6 @@ func TestServe(t *testing.T) {
 		t.Fatalf("ReadFrame(third) err = %v, want EOF", err)
 	}
 
-	if err := server.Serve(context.Background(), strings.NewReader("Content-Length: nope\r\n\r\n"), io.Discard); err == nil {
-		t.Fatal("Serve() should fail on malformed frame")
-	}
 	if err := server.Serve(context.Background(), strings.NewReader(frame("{")), errWriter{err: io.ErrClosedPipe}); err == nil {
 		t.Fatal("Serve() should fail when parse-error flush fails")
 	}
@@ -238,7 +215,7 @@ func TestServe(t *testing.T) {
 	}
 	newFrameWriter = oldNewFrameWriter
 
-	if err := server.Serve(context.Background(), strings.NewReader("Content-Length: 0\r\n\r\n"+frame(`{"jsonrpc":"2.0","id":1,"method":"ping"}`)), io.Discard); err != nil {
-		t.Fatalf("Serve(empty frame) error = %v", err)
+	if err := server.Serve(context.Background(), strings.NewReader("\n"+frame(`{"jsonrpc":"2.0","id":1,"method":"ping"}`)), io.Discard); err != nil {
+		t.Fatalf("Serve(empty line) error = %v", err)
 	}
 }
