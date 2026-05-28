@@ -23,7 +23,7 @@ Do not use it for a one-off task unless the user wants explicit tracking.
 
 ```bash
 command -v agent-plan
-agent-plan init
+agent-plan init --json
 agent-plan list --json
 agent-plan help show
 ```
@@ -45,7 +45,20 @@ agent-plan ready <plan-id> --json
 - Prefer `show --json` or `get --json` for a cold start on a known plan.
 - Prefer `ready --json` when you need actionable tasks only.
 
-### 3. Coordinate claim-specific work
+### 3. Create or update plan metadata
+
+```bash
+agent-plan create "Plan name" --description "Why this exists" --json
+agent-plan update <plan-id> --name "New name" --json
+agent-plan delete <plan-id> --yes --json
+```
+
+- Use `create` only when the user asked for a new plan or no suitable plan
+  exists.
+- `delete` prompts unless `--yes` is passed or
+  `AGENT_PLAN_NONINTERACTIVE=1` is set.
+
+### 4. Coordinate claim-specific work
 
 ```bash
 agent-plan next <plan-id> --by <agent-id> --json
@@ -56,13 +69,15 @@ agent-plan claim-next <plan-id> --by <agent-id> --json
 - Use `next --by <agent-id>` when claimer affinity matters; plain `next` does
   not infer any external claimer context.
 
-### 4. Update the plan as work changes
+### 5. Update the plan as work changes
 
 ```bash
 agent-plan add-task <plan-id> "Task title" --description "Why it is needed" --json
 agent-plan update-task <plan-id> <task-id> --status in_progress --json
 agent-plan update-task <plan-id> <task-id> --status complete --json
+agent-plan update-task <plan-id> <task-id> --status blocked --json
 agent-plan update-task <plan-id> <task-id> --depends-on <other-task-id> --json
+agent-plan update-task <plan-id> <task-id> --clear-dependencies --json
 agent-plan delete-task <plan-id> <task-id> --json
 ```
 
@@ -73,12 +88,37 @@ agent-plan delete-task <plan-id> <task-id> --json
 - Use `--parent` only when you want hierarchy or subtasks.
 - Prefer exact task IDs in agent workflows. Name resolution is exact, not fuzzy.
 
+## Task Statuses
+
+Valid task statuses are:
+
+- `not_started`
+- `in_progress`
+- `blocked`
+- `complete`
+- `cancelled`
+
+`update-task` can also change `--name`, `--description`, `--claimed-by`,
+`--clear-claimed-by`, `--depends-on`, `--clear-dependencies`, and `--order`.
+
+## Guidance Install
+
+```bash
+agent-plan install AGENTS.md --json
+agent-plan install CLAUDE.md --json
+agent-plan install skill --json
+agent-plan install --global skill --json
+```
+
+`install` is onboarding/scaffolding, not normal plan lifecycle state.
+
 ## MCP Surface
 
 Prefer MCP when the host agent already wants tool calls instead of shell calls.
 
 Primary MCP tools:
 
+- `plan_init`
 - `plan_create`
 - `plan_list`
 - `plan_get`
