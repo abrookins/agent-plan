@@ -76,6 +76,7 @@ agent-plan add-task <plan-id> "Task title" --description "Why it is needed" --js
 agent-plan update-task <plan-id> <task-id> --status in_progress --json
 agent-plan update-task <plan-id> <task-id> --status complete --json
 agent-plan update-task <plan-id> <task-id> --status blocked --json
+agent-plan update-task <plan-id> <task-id> --parent <parent-task-id> --json
 agent-plan update-task <plan-id> <task-id> --depends-on <other-task-id> --json
 agent-plan update-task <plan-id> <task-id> --clear-dependencies --json
 agent-plan delete-task <plan-id> <task-id> --json
@@ -88,6 +89,30 @@ agent-plan delete-task <plan-id> <task-id> --json
 - Use `--parent` only when you want hierarchy or subtasks.
 - Prefer exact task IDs in agent workflows. Name resolution is exact, not fuzzy.
 
+## Creating Plans From Specs
+
+When turning a spec into an `agent-plan`, do not stop at a flat task inventory.
+
+Required workflow:
+
+1. Read the source spec.
+2. Create parent tasks for sections or phases only as hierarchy.
+3. Create child tasks for each actionable spec item.
+4. Add explicit `--depends-on` relationships for execution order:
+   - Foundation/setup tasks come first.
+   - Phase N tasks depend on the relevant Phase N-1 completion gates.
+   - Component/page migrations depend on shared asset, token, and helper tasks.
+   - Verification and acceptance tasks depend on the implementation tasks they
+     validate.
+5. After creating tasks, audit the structure:
+   - Count tasks with `parent_id`.
+   - Count tasks with `depends_on`.
+   - Run `agent-plan ready <plan-id> --json`.
+6. If most or all tasks are ready, either add missing dependencies or explain
+   why the work is intentionally parallel.
+7. Do not mark the planning task complete until hierarchy and dependency
+   semantics have both been verified.
+
 ## Task Statuses
 
 Valid task statuses are:
@@ -99,7 +124,8 @@ Valid task statuses are:
 - `cancelled`
 
 `update-task` can also change `--name`, `--description`, `--claimed-by`,
-`--clear-claimed-by`, `--depends-on`, `--clear-dependencies`, and `--order`.
+`--clear-claimed-by`, `--parent`, `--depends-on`, `--clear-dependencies`, and
+`--order`.
 
 ## Guidance Install
 
@@ -107,10 +133,24 @@ Valid task statuses are:
 agent-plan install AGENTS.md --json
 agent-plan install CLAUDE.md --json
 agent-plan install skill --json
+agent-plan install --global AGENTS.md --json
+agent-plan install --global CLAUDE.md --json
 agent-plan install --global skill --json
 ```
 
 `install` is onboarding/scaffolding, not normal plan lifecycle state.
+
+## Other Commands
+
+```bash
+agent-plan mcp
+agent-plan version --json
+agent-plan help <command>
+agent-plan <command> --help
+```
+
+- `mcp` runs the stdio MCP server and does not use `--json`.
+- `version --json` prints the CLI version.
 
 ## MCP Surface
 

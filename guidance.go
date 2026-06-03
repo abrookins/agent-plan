@@ -216,6 +216,7 @@ Plan lifecycle:
 agent-plan init --json
 agent-plan create "Plan name" --description "Why this exists" --json
 agent-plan list --json
+agent-plan get <plan_id> --json
 agent-plan show <plan_id> --json
 agent-plan update <plan_id> --name "New name" --json
 agent-plan delete <plan_id> --yes --json
@@ -228,6 +229,8 @@ agent-plan add-task <plan_id> "Task name" --description "Why it is needed" --jso
 agent-plan update-task <plan_id> <task_id> --status in_progress --json
 agent-plan update-task <plan_id> <task_id> --status blocked --json
 agent-plan update-task <plan_id> <task_id> --status complete --json
+agent-plan update-task <plan_id> <task_id> --parent <parent_task_id> --json
+agent-plan update-task <plan_id> <task_id> --depends-on <other_task_id> --json
 agent-plan delete-task <plan_id> <task_id> --json
 ` + "```" + `
 
@@ -250,7 +253,7 @@ Other current commands:
 
 - Valid statuses are ` + "`not_started`" + `, ` + "`in_progress`" + `, ` + "`blocked`" + `, ` + "`complete`" + `, and ` + "`cancelled`" + `.
 - ` + "`update-task --status complete`" + ` archives the active task record into ` + "`history/*.done`" + `.
-- ` + "`update-task`" + ` can also change ` + "`--name`" + `, ` + "`--description`" + `, ` + "`--claimed-by`" + `, ` + "`--clear-claimed-by`" + `, ` + "`--depends-on`" + `, ` + "`--clear-dependencies`" + `, and ` + "`--order`" + `.
+- ` + "`update-task`" + ` can also change ` + "`--name`" + `, ` + "`--description`" + `, ` + "`--parent`" + `, ` + "`--claimed-by`" + `, ` + "`--clear-claimed-by`" + `, ` + "`--depends-on`" + `, ` + "`--clear-dependencies`" + `, and ` + "`--order`" + `.
 - ` + "`delete`" + ` prompts unless ` + "`--yes`" + ` is passed or ` + "`AGENT_PLAN_NONINTERACTIVE=1`" + ` is set.
 - Agent-facing commands support ` + "`--json`" + `; ` + "`mcp`" + ` uses the MCP wire format instead.
 
