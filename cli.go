@@ -489,6 +489,7 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 	status := fs.String("status", "", "new task status")
 	name := fs.String("name", "", "new task name")
 	description := fs.String("description", "", "new task description")
+	parent := fs.String("parent", "", "new parent task name or id; pass empty to move to the root")
 	claimedBy := fs.String("claimed-by", "", "record the task as claimed by a specific agent id")
 	clearClaimedBy := fs.Bool("clear-claimed-by", false, "remove any claimed-by value from the task")
 	order := fs.Int("order", -1, "sibling order")
@@ -501,6 +502,7 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 		"--status":             true,
 		"--name":               true,
 		"--description":        true,
+		"--parent":             true,
 		"--claimed-by":         true,
 		"--clear-claimed-by":   false,
 		"--depends-on":         true,
@@ -514,7 +516,7 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 		return 1
 	}
 	if fs.NArg() != 2 {
-		fmt.Fprintf(stderr, "usage: %s update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--claimed-by ID] [--clear-claimed-by] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>\n", program)
+		fmt.Fprintf(stderr, "usage: %s update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--parent TASK] [--claimed-by ID] [--clear-claimed-by] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>\n", program)
 		return 1
 	}
 	store, err := Open(*dir)
@@ -550,6 +552,19 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 		value := *description
 		descPtr = &value
 	}
+	var parentPtr *string
+	if isFlagPassed(args, "--parent") {
+		value := ""
+		if strings.TrimSpace(*parent) != "" {
+			parentTask, err := resolveTask(plan, *parent, "parent task")
+			if err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+			value = parentTask.ID
+		}
+		parentPtr = &value
+	}
 	if isFlagPassed(args, "--claimed-by") {
 		value := *claimedBy
 		claimedByPtr = &value
@@ -571,6 +586,7 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 		Status:            statusPtr,
 		Name:              namePtr,
 		Description:       descPtr,
+		ParentID:          parentPtr,
 		ClaimedBy:         claimedByPtr,
 		ClearClaimedBy:    *clearClaimedBy,
 		DependsOn:         deps,
@@ -911,9 +927,10 @@ var commandHelpEntries = map[string]helpEntry{
 	},
 	"update-task": {
 		Summary: "Update task status or metadata.",
-		Usage:   "update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--claimed-by ID] [--clear-claimed-by] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>",
+		Usage:   "update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--parent TASK] [--claimed-by ID] [--clear-claimed-by] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>",
 		Details: []string{
 			"Valid statuses: not_started, in_progress, blocked, complete, cancelled.",
+			"Parent references accept task IDs or exact task names; pass an empty --parent value to move a task to the root.",
 			"Setting --status complete archives the durable record into history/*.done.",
 		},
 		Examples: []string{

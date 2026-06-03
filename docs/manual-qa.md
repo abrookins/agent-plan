@@ -54,17 +54,19 @@ Build the binary under test:
 
 ```bash
 cd ~/src/agent-plan
-go build -o dist/agent-plan ./cmd/agent-plan
+make build
 ```
 
 Set a reusable workspace:
 
 ```bash
-export AP_BIN=~/src/agent-plan/dist/agent-plan
+export AP_BIN="$PWD/dist/agent-plan-$(go env GOOS)-$(go env GOARCH)"
 export AP_WORKDIR="$(mktemp -d)"
 mkdir -p "$AP_WORKDIR"
 cd "$AP_WORKDIR"
 ```
+
+On Windows, append `.exe` to `AP_BIN`.
 
 Unless a case says otherwise, run all commands inside the temporary workspace.
 Prepend `"$AP_BIN"` to every command example in the cases below.

@@ -120,6 +120,7 @@ type TaskUpdateOptions struct {
 	Status            *Status
 	Name              *string
 	Description       *string
+	ParentID          *string
 	ClaimedBy         *string
 	ClearClaimedBy    bool
 	DependsOn         []string

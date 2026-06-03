@@ -269,6 +269,66 @@ func TestStoreHelpersAndGuidance(t *testing.T) {
 	}
 }
 
+func TestInstallGuidanceReplacesLegacyManagedBlock(t *testing.T) {
+	repo := t.TempDir()
+	path := filepath.Join(repo, "AGENTS.md")
+	existing := strings.Join([]string{
+		"# Existing Instructions",
+		"",
+		legacyCodexGuidanceStart,
+		"## Agent Dashboard Plan Management",
+		"",
+		"Old generated guidance.",
+		legacyCodexGuidanceEnd,
+		"",
+		"Keep this footer.",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(existing), defaultFilePerm); err != nil {
+		t.Fatalf("WriteFile(AGENTS) error = %v", err)
+	}
+
+	installedPath, err := InstallGuidance("AGENTS.md", false, repo)
+	if err != nil {
+		t.Fatalf("InstallGuidance(AGENTS) error = %v", err)
+	}
+	if installedPath != path {
+		t.Fatalf("InstallGuidance path = %q, want %q", installedPath, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(AGENTS) error = %v", err)
+	}
+	content := string(data)
+	if strings.Contains(content, "agent-dashboard:codex-guidance") {
+		t.Fatalf("legacy marker was not replaced: %q", content)
+	}
+	if strings.Contains(content, "Old generated guidance.") {
+		t.Fatalf("legacy guidance body was not replaced: %q", content)
+	}
+	if strings.Count(content, codexGuidanceStart) != 1 {
+		t.Fatalf("codex start marker count = %d content=%q", strings.Count(content, codexGuidanceStart), content)
+	}
+	if strings.Count(content, codexGuidanceEnd) != 1 {
+		t.Fatalf("codex end marker count = %d content=%q", strings.Count(content, codexGuidanceEnd), content)
+	}
+	if !strings.Contains(content, "# Existing Instructions") || !strings.Contains(content, "Keep this footer.") {
+		t.Fatalf("surrounding content was not preserved: %q", content)
+	}
+
+	if _, err := InstallGuidance("AGENTS.md", false, repo); err != nil {
+		t.Fatalf("second InstallGuidance(AGENTS) error = %v", err)
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(AGENTS second) error = %v", err)
+	}
+	content = string(data)
+	if strings.Count(content, codexGuidanceStart) != 1 || strings.Count(content, codexGuidanceEnd) != 1 {
+		t.Fatalf("reinstall duplicated managed guidance: %q", content)
+	}
+}
+
 func TestMainNamedHelp(t *testing.T) {
 	var stdout strings.Builder
 	var stderr strings.Builder

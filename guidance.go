@@ -5,16 +5,26 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 )
 
 const (
-	codexGuidanceStart      = "<!-- agent-plan:codex-guidance:start -->"
-	codexGuidanceEnd        = "<!-- agent-plan:codex-guidance:end -->"
-	claudeGuidanceStart     = "<!-- agent-plan:claude-guidance:start -->"
-	claudeGuidanceEnd       = "<!-- agent-plan:claude-guidance:end -->"
-	planManagementSkillSlug = "agent-plan-management"
+	codexGuidanceStart        = "<!-- agent-plan:codex-guidance:start -->"
+	codexGuidanceEnd          = "<!-- agent-plan:codex-guidance:end -->"
+	claudeGuidanceStart       = "<!-- agent-plan:claude-guidance:start -->"
+	claudeGuidanceEnd         = "<!-- agent-plan:claude-guidance:end -->"
+	legacyCodexGuidanceStart  = "<!-- agent-dashboard:codex-guidance:start -->"
+	legacyCodexGuidanceEnd    = "<!-- agent-dashboard:codex-guidance:end -->"
+	legacyClaudeGuidanceStart = "<!-- agent-dashboard:claude-guidance:start -->"
+	legacyClaudeGuidanceEnd   = "<!-- agent-dashboard:claude-guidance:end -->"
+	planManagementSkillSlug   = "agent-plan-management"
 )
+
+type guidanceMarkerPair struct {
+	start string
+	end   string
+}
 
 func InstallGuidance(target string, globalInstall bool, workspaceRoot string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(target))
@@ -33,7 +43,7 @@ func InstallGuidance(target string, globalInstall bool, workspaceRoot string) (s
 		if globalInstall {
 			destination = filepath.Join(os.Getenv("HOME"), ".codex", "AGENTS.md")
 		}
-		if err := upsertManagedGuidance(destination, buildCodexGuidance(), codexGuidanceStart, codexGuidanceEnd); err != nil {
+		if err := upsertManagedGuidance(destination, buildCodexGuidance(), guidanceMarkerPair{codexGuidanceStart, codexGuidanceEnd}, guidanceMarkerPair{legacyCodexGuidanceStart, legacyCodexGuidanceEnd}); err != nil {
 			return "", err
 		}
 		return destination, nil
@@ -42,7 +52,7 @@ func InstallGuidance(target string, globalInstall bool, workspaceRoot string) (s
 		if globalInstall {
 			destination = filepath.Join(os.Getenv("HOME"), ".claude", "CLAUDE.md")
 		}
-		if err := upsertManagedGuidance(destination, buildClaudeGuidance(), claudeGuidanceStart, claudeGuidanceEnd); err != nil {
+		if err := upsertManagedGuidance(destination, buildClaudeGuidance(), guidanceMarkerPair{claudeGuidanceStart, claudeGuidanceEnd}, guidanceMarkerPair{legacyClaudeGuidanceStart, legacyClaudeGuidanceEnd}); err != nil {
 			return "", err
 		}
 		return destination, nil
@@ -64,18 +74,34 @@ func InstallGuidance(target string, globalInstall bool, workspaceRoot string) (s
 	}
 }
 
-func upsertManagedGuidance(path, guidance, startMarker, endMarker string) error {
+func upsertManagedGuidance(path, guidance string, primaryMarkers guidanceMarkerPair, alternateMarkers ...guidanceMarkerPair) error {
 	existing := ""
 	if data, err := readFileFunc(path); err == nil {
 		existing = string(data)
 	} else if !errorsIsNotExist(err) {
 		return err
 	}
-	managedBlock := startMarker + "\n" + guidance + "\n" + endMarker + "\n"
-	pattern := regexp.MustCompile(regexp.QuoteMeta(startMarker) + `(?s:.*?)` + regexp.QuoteMeta(endMarker) + `\n?`)
+	managedBlock := primaryMarkers.start + "\n" + guidance + "\n" + primaryMarkers.end + "\n"
+	markers := append([]guidanceMarkerPair{primaryMarkers}, alternateMarkers...)
+	matches := findManagedGuidanceBlocks(existing, markers)
 	updated := ""
-	if pattern.MatchString(existing) {
-		updated = pattern.ReplaceAllString(existing, managedBlock)
+	if len(matches) > 0 {
+		var builder strings.Builder
+		cursor := 0
+		replaced := false
+		for _, match := range matches {
+			if match.start < cursor {
+				continue
+			}
+			builder.WriteString(existing[cursor:match.start])
+			if !replaced {
+				builder.WriteString(managedBlock)
+				replaced = true
+			}
+			cursor = match.end
+		}
+		builder.WriteString(existing[cursor:])
+		updated = builder.String()
 	} else {
 		prefix := strings.TrimRight(existing, "\n")
 		if prefix != "" {
@@ -85,6 +111,28 @@ func upsertManagedGuidance(path, guidance, startMarker, endMarker string) error 
 		}
 	}
 	return atomicWriteFile(path, []byte(updated), defaultFilePerm)
+}
+
+type guidanceBlockMatch struct {
+	start int
+	end   int
+}
+
+func findManagedGuidanceBlocks(content string, markers []guidanceMarkerPair) []guidanceBlockMatch {
+	matches := make([]guidanceBlockMatch, 0)
+	for _, marker := range markers {
+		pattern := regexp.MustCompile(regexp.QuoteMeta(marker.start) + `(?s:.*?)` + regexp.QuoteMeta(marker.end) + `\n?`)
+		for _, index := range pattern.FindAllStringIndex(content, -1) {
+			matches = append(matches, guidanceBlockMatch{start: index[0], end: index[1]})
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].start == matches[j].start {
+			return matches[i].end < matches[j].end
+		}
+		return matches[i].start < matches[j].start
+	})
+	return matches
 }
 
 func buildCodexGuidance() string {
@@ -100,6 +148,9 @@ When the prompt or current work references a shared plan, task list, or explicit
 - Add discovered work with ` + "`agent-plan add-task <plan_id> \"Task name\" --description \"Why it is needed\" --json`" + `
 - Use ` + "`--depends-on <task_id>`" + ` for blocking relationships; use ` + "`--parent <task_id>`" + ` only for hierarchy or subtasks
 - ` + "`agent-plan ready`" + `, ` + "`agent-plan next`" + `, and ` + "`agent-plan claim-next`" + ` only use dependencies for readiness; parent-child nesting alone does not block selection
+- When creating a plan from a spec, create parent tasks for sections/phases, child tasks for actionable items, and explicit ` + "`--depends-on`" + ` edges for execution order
+- After bulk task creation, audit ` + "`agent-plan ready <plan_id> --json`" + `; if most or all tasks are ready, add missing dependencies or state why the work is intentionally parallel
+- Do not mark a plan-creation task complete until both hierarchy and dependency semantics have been verified
 - Use ` + "`agent-plan claim-next <plan_id> --by <agent-id> --json`" + ` when you need exclusive ownership before file edits
 - Use ` + "`agent-plan next <plan_id> --by <agent-id> --json`" + ` when claimer affinity matters; plain ` + "`next`" + ` does not infer external claimer context
 - Use ` + "`agent-plan install AGENTS.md|CLAUDE.md|skill`" + ` only for onboarding or guidance setup, not normal plan lifecycle updates
@@ -135,6 +186,27 @@ Use this skill when a prompt references a shared plan, task list, or explicit ` 
 - ` + "`agent-plan ready`" + `, ` + "`agent-plan next`" + `, and ` + "`agent-plan claim-next`" + ` only use ` + "`depends_on`" + ` for readiness; a child task without dependencies is still ready.
 - Use ` + "`agent-plan next <plan_id> --by <agent-id> --json`" + ` when claimer affinity matters; plain ` + "`next`" + ` does not infer external claimer context.
 - Prefer task and plan IDs. Names must match exactly when used as references.
+
+## Creating Plans From Specs
+
+When turning a spec into an ` + "`agent-plan`" + `, do not stop at a flat task inventory.
+
+Required workflow:
+
+1. Read the source spec.
+2. Create parent tasks for sections or phases only as hierarchy.
+3. Create child tasks for each actionable spec item.
+4. Add explicit ` + "`--depends-on`" + ` relationships for execution order:
+   - Foundation/setup tasks come first.
+   - Phase N tasks depend on the relevant Phase N-1 completion gates.
+   - Component/page migrations depend on shared asset, token, and helper tasks.
+   - Verification and acceptance tasks depend on the implementation tasks they validate.
+5. After creating tasks, audit the structure:
+   - Count tasks with ` + "`parent_id`" + `.
+   - Count tasks with ` + "`depends_on`" + `.
+   - Run ` + "`agent-plan ready <plan_id> --json`" + `.
+6. If most or all tasks are ready, either add missing dependencies or explicitly report why the work is intentionally parallel.
+7. Do not mark the planning task complete until hierarchy and dependency semantics have both been verified.
 
 ## Current CLI Surface
 

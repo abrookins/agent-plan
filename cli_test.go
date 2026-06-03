@@ -231,6 +231,32 @@ func TestCLIUpdateTaskOrderReturnsUpdatedTask(t *testing.T) {
 	if updated.ID != taskA.ID {
 		t.Fatalf("updated task id = %q, want %q", updated.ID, taskA.ID)
 	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"update-task", "--dir", root, planID, "B", "--parent", taskA.ID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("update-task parent code = %d stderr=%s", code, stderr.String())
+	}
+	var reparented TaskRecord
+	if err := json.Unmarshal(stdout.Bytes(), &reparented); err != nil {
+		t.Fatalf("Unmarshal(update-task parent) error = %v", err)
+	}
+	if reparented.ParentID != taskA.ID {
+		t.Fatalf("reparented ParentID = %q, want %q", reparented.ParentID, taskA.ID)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"update-task", "--dir", root, planID, "B", "--parent", "", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("update-task clear parent code = %d stderr=%s", code, stderr.String())
+	}
+	var rootTask TaskRecord
+	if err := json.Unmarshal(stdout.Bytes(), &rootTask); err != nil {
+		t.Fatalf("Unmarshal(update-task clear parent) error = %v", err)
+	}
+	if rootTask.ParentID != "" {
+		t.Fatalf("rootTask ParentID = %q, want empty", rootTask.ParentID)
+	}
 }
 
 func TestCLIConfirmDeleteAndErrorPaths(t *testing.T) {

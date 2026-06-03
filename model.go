@@ -319,6 +319,34 @@ func (p *Plan) ApplyTaskUpdate(taskID string, opts TaskUpdateOptions) (*TaskReco
 	if opts.Description != nil {
 		task.Description = *opts.Description
 	}
+	if opts.ParentID != nil {
+		parentID := strings.TrimSpace(*opts.ParentID)
+		if parentID == task.ID {
+			return nil, fmt.Errorf("task cannot be its own parent")
+		}
+		for cursor := parentID; cursor != ""; {
+			parent := p.GetTask(cursor)
+			if parent == nil {
+				return nil, fmt.Errorf("parent task not found: %s", cursor)
+			}
+			if parent.ID == task.ID {
+				return nil, fmt.Errorf("task cannot be reparented under one of its descendants")
+			}
+			cursor = parent.ParentID
+		}
+		if task.ParentID != parentID {
+			siblings := p.getChildren(parentID)
+			task.ParentID = parentID
+			if opts.Order == nil {
+				task.Order = len(siblings)
+			}
+			p.normalizeSiblingOrder()
+			task = p.GetTask(task.ID)
+			if task == nil {
+				return nil, ErrTaskNotFound
+			}
+		}
+	}
 	if opts.ClearClaimedBy {
 		task.ClaimedBy = ""
 		task.Assignee = ""

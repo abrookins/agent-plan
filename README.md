@@ -36,7 +36,7 @@ make clean
 The direct Go build entry point is:
 
 ```bash
-go build -o dist/agent-plan ./cmd/agent-plan
+go build -o "dist/agent-plan-$(go env GOOS)-$(go env GOARCH)" ./cmd/agent-plan
 ```
 
 ## Workspace Layout

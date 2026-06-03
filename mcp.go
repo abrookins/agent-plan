@@ -103,6 +103,7 @@ func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 				"status":             map[string]any{"type": "string"},
 				"name":               map[string]any{"type": "string"},
 				"description":        map[string]any{"type": "string"},
+				"parent":             taskSchema,
 				"claimed_by":         map[string]any{"type": "string"},
 				"clear_claimed_by":   map[string]any{"type": "boolean"},
 				"depends_on":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
@@ -457,6 +458,17 @@ func taskUpdateOptionsFromArgs(plan *Plan, taskID string, args map[string]any) (
 	if _, ok := args["description"]; ok {
 		value := optionalString(args, "description")
 		opts.Description = &value
+	}
+	if _, ok := args["parent"]; ok {
+		value := ""
+		if parentRef := optionalString(args, "parent"); parentRef != "" {
+			parentTask, err := resolveTask(plan, parentRef, "parent task")
+			if err != nil {
+				return TaskUpdateOptions{}, err
+			}
+			value = parentTask.ID
+		}
+		opts.ParentID = &value
 	}
 	if _, ok := args["claimed_by"]; ok {
 		value := optionalString(args, "claimed_by")
