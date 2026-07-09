@@ -3,6 +3,7 @@ package agentplan
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -128,6 +129,74 @@ func TestMCPPlanLifecycle(t *testing.T) {
 	}
 	if len(plan.Tasks) != 2 {
 		t.Fatalf("plan_show plan = %#v", plan)
+	}
+
+	result = server.CallTool(context.Background(), "plan_import", map[string]any{
+		"plan": plan.ID,
+		"spec": map[string]any{
+			"tasks": []any{
+				map[string]any{"key": "verify", "name": "Verify", "depends_on": []any{"Implementation"}},
+			},
+		},
+	})
+	if result.IsError {
+		t.Fatalf("plan_import result = %#v", result)
+	}
+	raw, err = json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatalf("Marshal(plan_import) error = %v", err)
+	}
+	var report BulkImportReport
+	if err := json.Unmarshal(raw, &report); err != nil {
+		t.Fatalf("Unmarshal(plan_import) error = %v", err)
+	}
+	if report.Created != 1 {
+		t.Fatalf("plan_import report = %#v", report)
+	}
+
+	result = server.CallTool(context.Background(), "plan_stats", map[string]any{"plan": plan.ID})
+	if result.IsError {
+		t.Fatalf("plan_stats result = %#v", result)
+	}
+	raw, err = json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatalf("Marshal(plan_stats) error = %v", err)
+	}
+	var stats PlanStats
+	if err := json.Unmarshal(raw, &stats); err != nil {
+		t.Fatalf("Unmarshal(plan_stats) error = %v", err)
+	}
+	if stats.Total != 3 {
+		t.Fatalf("plan_stats = %#v", stats)
+	}
+
+	result = server.CallTool(context.Background(), "plan_chain", map[string]any{
+		"plan":  plan.ID,
+		"tasks": []any{"Spec", "Implementation", "Verify"},
+	})
+	if result.IsError {
+		t.Fatalf("plan_chain result = %#v", result)
+	}
+
+	result = server.CallTool(context.Background(), "plan_audit", map[string]any{"plan": plan.ID})
+	if result.IsError {
+		t.Fatalf("plan_audit result = %#v", result)
+	}
+
+	store, err := Open(root)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	if err := os.WriteFile(store.planLockPath(plan.ID), []byte(`{"pid":999999999,"host":"","created_at":"2026-01-01T00:00:00Z"}`), defaultFilePerm); err != nil {
+		t.Fatalf("WriteFile(lock) error = %v", err)
+	}
+	result = server.CallTool(context.Background(), "plan_lock_status", map[string]any{"plan": plan.ID})
+	if result.IsError {
+		t.Fatalf("plan_lock_status result = %#v", result)
+	}
+	result = server.CallTool(context.Background(), "plan_lock_clear", map[string]any{"plan": plan.ID, "if_dead": true})
+	if result.IsError {
+		t.Fatalf("plan_lock_clear result = %#v", result)
 	}
 
 	result = server.CallTool(context.Background(), "plan_delete", map[string]any{"plan": plan.ID})

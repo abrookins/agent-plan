@@ -68,6 +68,16 @@ func runCLI(ctx context.Context, program string, args []string, stdin io.Reader,
 		return runUpdateTask(program, stdout, stderr, args[1:])
 	case "delete-task":
 		return runDeleteTask(program, stdout, stderr, args[1:])
+	case "import":
+		return runImport(program, stdin, stdout, stderr, args[1:])
+	case "stats":
+		return runStats(program, stdout, stderr, args[1:])
+	case "audit":
+		return runAudit(program, stdout, stderr, args[1:])
+	case "lock":
+		return runLock(program, stdout, stderr, args[1:])
+	case "chain":
+		return runChain(program, stdout, stderr, args[1:])
 	case "ready":
 		return runReady(program, stdout, stderr, args[1:])
 	case "next":
@@ -653,6 +663,280 @@ func runDeleteTask(program string, stdout, stderr io.Writer, args []string) int 
 	return 0
 }
 
+func runImport(program string, stdin io.Reader, stdout, stderr io.Writer, args []string) int {
+	fs := newCommandFlagSet("import", program, stderr)
+	dir := fs.String("dir", "", "workspace root")
+	filePath := fs.String("file", "-", "bulk import JSON file path, or - for stdin")
+	dryRun := fs.Bool("dry-run", false, "validate without mutating the plan")
+	jsonOut := fs.Bool("json", false, "emit json")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{
+		"--dir":     true,
+		"--file":    true,
+		"--dry-run": false,
+		"--json":    false,
+	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintf(stderr, "usage: %s import [--dir PATH] [--file PATH] [--dry-run] [--json] <plan>\n", program)
+		return 1
+	}
+	spec, err := readBulkImportSpec(*filePath, stdin)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	store, err := Open(*dir)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	plan, err := resolvePlan(store, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	report, err := store.ImportTasks(plan.ID, spec, BulkImportOptions{DryRun: *dryRun})
+	if err != nil {
+		if *jsonOut && report != nil {
+			_ = writeJSON(stdout, report, stderr)
+		} else {
+			fmt.Fprintln(stderr, err)
+		}
+		return 1
+	}
+	if *jsonOut {
+		return writeJSON(stdout, report, stderr)
+	}
+	fmt.Fprintln(stdout, formatBulkImportReport(*report))
+	return 0
+}
+
+func runStats(program string, stdout, stderr io.Writer, args []string) int {
+	fs := newCommandFlagSet("stats", program, stderr)
+	dir := fs.String("dir", "", "workspace root")
+	jsonOut := fs.Bool("json", false, "emit json")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{
+		"--dir":  true,
+		"--json": false,
+	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintf(stderr, "usage: %s stats [--dir PATH] [--json] <plan>\n", program)
+		return 1
+	}
+	store, err := Open(*dir)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	plan, err := resolvePlan(store, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	stats, err := store.Stats(plan.ID)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if *jsonOut {
+		return writeJSON(stdout, stats, stderr)
+	}
+	fmt.Fprintln(stdout, formatPlanStats(stats))
+	return 0
+}
+
+func runAudit(program string, stdout, stderr io.Writer, args []string) int {
+	fs := newCommandFlagSet("audit", program, stderr)
+	dir := fs.String("dir", "", "workspace root")
+	jsonOut := fs.Bool("json", false, "emit json")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{
+		"--dir":  true,
+		"--json": false,
+	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintf(stderr, "usage: %s audit [--dir PATH] [--json] <plan>\n", program)
+		return 1
+	}
+	store, err := Open(*dir)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	plan, err := resolvePlan(store, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	report, err := store.Audit(plan.ID)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if *jsonOut {
+		return writeJSON(stdout, report, stderr)
+	}
+	fmt.Fprintln(stdout, formatAuditReport(report))
+	return 0
+}
+
+func runLock(program string, stdout, stderr io.Writer, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintf(stderr, "usage: %s lock <status|clear> [options] <plan>\n", program)
+		return 1
+	}
+	switch args[0] {
+	case "status":
+		return runLockStatus(program, stdout, stderr, args[1:])
+	case "clear":
+		return runLockClear(program, stdout, stderr, args[1:])
+	default:
+		fmt.Fprintf(stderr, "unknown lock command: %s\n", args[0])
+		return 1
+	}
+}
+
+func runLockStatus(program string, stdout, stderr io.Writer, args []string) int {
+	fs := newCommandFlagSet("lock status", program, stderr)
+	dir := fs.String("dir", "", "workspace root")
+	jsonOut := fs.Bool("json", false, "emit json")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{
+		"--dir":  true,
+		"--json": false,
+	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintf(stderr, "usage: %s lock status [--dir PATH] [--json] <plan>\n", program)
+		return 1
+	}
+	store, plan, err := resolveStoreAndPlan(*dir, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	status, err := store.PlanLockStatus(plan.ID)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if *jsonOut {
+		return writeJSON(stdout, status, stderr)
+	}
+	fmt.Fprintln(stdout, formatLockStatus(status))
+	return 0
+}
+
+func runLockClear(program string, stdout, stderr io.Writer, args []string) int {
+	fs := newCommandFlagSet("lock clear", program, stderr)
+	dir := fs.String("dir", "", "workspace root")
+	ifDead := fs.Bool("if-dead", false, "clear only when owner process is locally proven dead")
+	jsonOut := fs.Bool("json", false, "emit json")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{
+		"--dir":     true,
+		"--if-dead": false,
+		"--json":    false,
+	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if fs.NArg() != 1 {
+		fmt.Fprintf(stderr, "usage: %s lock clear [--dir PATH] --if-dead [--json] <plan>\n", program)
+		return 1
+	}
+	if !*ifDead {
+		fmt.Fprintln(stderr, "lock clear requires --if-dead")
+		return 1
+	}
+	store, plan, err := resolveStoreAndPlan(*dir, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	result, err := store.ClearPlanLockIfDead(plan.ID)
+	if err != nil {
+		if *jsonOut {
+			_ = writeJSON(stdout, result, stderr)
+		} else {
+			fmt.Fprintln(stderr, err)
+		}
+		return 1
+	}
+	if *jsonOut {
+		return writeJSON(stdout, result, stderr)
+	}
+	if result.Cleared {
+		fmt.Fprintf(stdout, "Cleared lock: %s\n", result.Status.Path)
+	} else {
+		fmt.Fprintf(stdout, "No lock to clear: %s\n", result.Status.Path)
+	}
+	return 0
+}
+
+func runChain(program string, stdout, stderr io.Writer, args []string) int {
+	fs := newCommandFlagSet("chain", program, stderr)
+	dir := fs.String("dir", "", "workspace root")
+	jsonOut := fs.Bool("json", false, "emit json")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{
+		"--dir":  true,
+		"--json": false,
+	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if fs.NArg() < 3 {
+		fmt.Fprintf(stderr, "usage: %s chain [--dir PATH] [--json] <plan> <task> <task> [task...]\n", program)
+		return 1
+	}
+	store, plan, err := resolveStoreAndPlan(*dir, fs.Arg(0))
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	taskIDs := make([]string, 0, fs.NArg()-1)
+	for _, ref := range fs.Args()[1:] {
+		task, err := resolveTask(plan, ref, "task")
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		taskIDs = append(taskIDs, task.ID)
+	}
+	updated, err := store.ChainTasks(plan.ID, taskIDs)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if *jsonOut {
+		return writeJSON(stdout, updated, stderr)
+	}
+	fmt.Fprintf(stdout, "Chained %d tasks:\n", len(updated))
+	for _, task := range updated {
+		fmt.Fprintln(stdout, formatTask(task, 0))
+	}
+	return 0
+}
+
 func runReady(program string, stdout, stderr io.Writer, args []string) int {
 	fs := newCommandFlagSet("ready", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
@@ -942,6 +1226,49 @@ var commandHelpEntries = map[string]helpEntry{
 		Summary: "Delete a task and any descendants.",
 		Usage:   "delete-task [--dir PATH] [--json] <plan> <task>",
 	},
+	"import": {
+		Summary: "Import or sync a structured task graph.",
+		Usage:   "import [--dir PATH] [--file PATH] [--dry-run] [--json] <plan>",
+		Details: []string{
+			"Reads JSON with a tasks array and optional chains array.",
+			"Validates the full graph before writing. --dry-run reports changes without mutating the plan.",
+			"Task keys are persisted as import_key values so re-running the same input converges instead of duplicating tasks.",
+		},
+		Examples: []string{
+			"import c1ebfc53 --file plan-tasks.json --dry-run --json",
+			"import c1ebfc53 --file plan-tasks.json --json",
+		},
+	},
+	"stats": {
+		Summary: "Show compact plan counts.",
+		Usage:   "stats [--dir PATH] [--json] <plan>",
+		Details: []string{
+			"Reports task, status, ready, claim, dependency, and history counts without returning every task.",
+		},
+	},
+	"audit": {
+		Summary: "Audit a plan for structural and coordination problems.",
+		Usage:   "audit [--dir PATH] [--json] <plan>",
+		Details: []string{
+			"Reports duplicate names, bad parent/dependency references, cycles, stale locks, orphan files, and suspicious ready counts.",
+		},
+	},
+	"lock": {
+		Summary: "Inspect or safely clear a plan lock.",
+		Usage:   "lock <status|clear> [options] <plan>",
+		Details: []string{
+			"Use `lock status <plan>` to inspect owner PID, host, age, and local liveness.",
+			"Use `lock clear --if-dead <plan>` to remove a lock only when the local owner process is proven dead.",
+		},
+	},
+	"chain": {
+		Summary: "Add dependency edges between existing tasks.",
+		Usage:   "chain [--dir PATH] [--json] <plan> <task> <task> [task...]",
+		Details: []string{
+			"Each task after the first is updated to depend on the previous task.",
+			"Task references accept IDs or exact names. Existing dependencies are preserved and duplicates are removed.",
+		},
+	},
 	"ready": {
 		Summary: "List actionable tasks whose dependencies are complete.",
 		Usage:   "ready [--dir PATH] [--json] <plan>",
@@ -999,6 +1326,11 @@ var commandHelpOrder = []string{
 	"add-task",
 	"update-task",
 	"delete-task",
+	"import",
+	"stats",
+	"audit",
+	"lock",
+	"chain",
 	"ready",
 	"next",
 	"claim-next",
@@ -1061,6 +1393,130 @@ func writeJSON(w io.Writer, value any, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+func resolveStoreAndPlan(dir, planRef string) (*Store, *Plan, error) {
+	store, err := Open(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	plan, err := resolvePlan(store, planRef)
+	if err != nil {
+		return nil, nil, err
+	}
+	return store, plan, nil
+}
+
+func readBulkImportSpec(path string, stdin io.Reader) (BulkImportSpec, error) {
+	cleanedPath := strings.TrimSpace(path)
+	var data []byte
+	var err error
+	if cleanedPath == "" || cleanedPath == "-" {
+		data, err = io.ReadAll(stdin)
+	} else {
+		data, err = os.ReadFile(cleanedPath)
+	}
+	if err != nil {
+		return BulkImportSpec{}, err
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	var spec BulkImportSpec
+	if err := decoder.Decode(&spec); err != nil {
+		return BulkImportSpec{}, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("bulk import JSON must contain a single object")
+		}
+		return BulkImportSpec{}, err
+	}
+	return spec, nil
+}
+
+func formatBulkImportReport(report BulkImportReport) string {
+	mode := "Applied"
+	if report.DryRun {
+		mode = "Dry run"
+	}
+	lines := []string{
+		fmt.Sprintf("%s import for plan %s: %d tasks (%d create, %d update, %d unchanged)", mode, report.PlanID, report.Total, report.Created, report.Updated, report.Unchanged),
+	}
+	if len(report.Errors) > 0 {
+		lines = append(lines, "Errors:")
+		for _, err := range report.Errors {
+			lines = append(lines, "  - "+err)
+		}
+	}
+	if len(report.Changes) > 0 {
+		lines = append(lines, "Changes:")
+		for _, change := range report.Changes {
+			key := ""
+			if change.Key != "" {
+				key = " key=" + change.Key
+			}
+			lines = append(lines, fmt.Sprintf("  - %s %s%s %s", change.Action, change.ID, key, change.Name))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatPlanStats(stats PlanStats) string {
+	lines := []string{
+		fmt.Sprintf("Plan: %s (%s)", stats.Name, stats.PlanID),
+		fmt.Sprintf("Tasks: %d total, %d ready, %d claimed", stats.Total, stats.ReadyCount, stats.ClaimedCount),
+		fmt.Sprintf("Structure: %d root, %d parented, %d with dependencies", stats.RootCount, stats.ParentedCount, stats.DependencyCount),
+		fmt.Sprintf("History: %d complete, next sequence %d", stats.HistoryCount, stats.NextSequence),
+		"Statuses:",
+	}
+	for _, status := range []Status{StatusNotStarted, StatusInProgress, StatusBlocked, StatusComplete, StatusCancelled} {
+		lines = append(lines, fmt.Sprintf("  %s: %d", status, stats.StatusCounts[status]))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatAuditReport(report AuditReport) string {
+	lines := []string{
+		fmt.Sprintf("Audit: %s", report.PlanID),
+		fmt.Sprintf("Findings: %d", len(report.Findings)),
+	}
+	if len(report.Findings) == 0 {
+		lines = append(lines, "No findings.")
+		return strings.Join(lines, "\n")
+	}
+	for _, finding := range report.Findings {
+		target := finding.TaskID
+		if target == "" {
+			target = finding.Path
+		}
+		if target != "" {
+			target = " " + target
+		}
+		lines = append(lines, fmt.Sprintf("- %s %s%s: %s", finding.Severity, finding.Code, target, finding.Message))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatLockStatus(status LockStatus) string {
+	if !status.Exists {
+		return fmt.Sprintf("No lock: %s", status.Path)
+	}
+	alive := "unknown"
+	if status.OwnerAlive != nil {
+		if *status.OwnerAlive {
+			alive = "true"
+		} else {
+			alive = "false"
+		}
+	}
+	return strings.Join([]string{
+		fmt.Sprintf("Lock: %s", status.Path),
+		fmt.Sprintf("PID: %d", status.PID),
+		fmt.Sprintf("Host: %s", dashIfEmpty(status.Host)),
+		fmt.Sprintf("Created: %s", dashIfEmpty(status.CreatedAt)),
+		fmt.Sprintf("Owner alive: %s", alive),
+	}, "\n")
 }
 
 func formatTaskSummary(task TaskSummary) string {

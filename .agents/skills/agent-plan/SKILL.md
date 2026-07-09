@@ -39,10 +39,15 @@ agent-plan help show
 agent-plan list --json
 agent-plan get <plan-id> --json
 agent-plan show <plan-id> --json
+agent-plan stats <plan-id> --json
+agent-plan audit <plan-id> --json
 agent-plan ready <plan-id> --json
 ```
 
 - Prefer `show --json` or `get --json` for a cold start on a known plan.
+- Prefer `stats --json` when you only need compact counts and readiness.
+- Prefer `audit --json` when a plan may have bad edges, stale locks, or
+  suspicious readiness.
 - Prefer `ready --json` when you need actionable tasks only.
 
 ### 3. Create or update plan metadata
@@ -79,6 +84,8 @@ agent-plan update-task <plan-id> <task-id> --status blocked --json
 agent-plan update-task <plan-id> <task-id> --parent <parent-task-id> --json
 agent-plan update-task <plan-id> <task-id> --depends-on <other-task-id> --json
 agent-plan update-task <plan-id> <task-id> --clear-dependencies --json
+agent-plan update-task <plan-id> <task-id> --clear-dependencies --depends-on <replacement-task-id> --json
+agent-plan chain <plan-id> <first-task-id> <second-task-id> <third-task-id> --json
 agent-plan delete-task <plan-id> <task-id> --json
 ```
 
@@ -86,12 +93,40 @@ agent-plan delete-task <plan-id> <task-id> --json
 - Use `--status complete` when work is done so the durable record moves into
   `history/*.done`.
 - Use `--depends-on` for blocking relationships.
+- Use `--clear-dependencies --depends-on <id>` to replace dependency edges in
+  one command.
+- Use `chain` when several existing tasks should execute in sequence.
 - Use `--parent` only when you want hierarchy or subtasks.
 - Prefer exact task IDs in agent workflows. Name resolution is exact, not fuzzy.
 
 ## Creating Plans From Specs
 
 When turning a spec into an `agent-plan`, do not stop at a flat task inventory.
+For large specs or generated plans, prefer one validated bulk import over many
+individual task mutations.
+
+Bulk import workflow:
+
+```bash
+agent-plan import <plan-id> --file tasks.json --dry-run --json
+agent-plan import <plan-id> --file tasks.json --json
+agent-plan stats <plan-id> --json
+agent-plan audit <plan-id> --json
+agent-plan ready <plan-id> --json
+```
+
+Bulk import accepts stable `key` values for reruns and `chains` for concise
+sequential dependency edges:
+
+```json
+{
+  "tasks": [
+    {"key": "phase-1", "name": "Phase 1"},
+    {"key": "phase-2", "name": "Phase 2"}
+  ],
+  "chains": [["phase-1", "phase-2"]]
+}
+```
 
 Required workflow:
 
@@ -107,6 +142,8 @@ Required workflow:
 5. After creating tasks, audit the structure:
    - Count tasks with `parent_id`.
    - Count tasks with `depends_on`.
+   - Run `agent-plan stats <plan-id> --json`.
+   - Run `agent-plan audit <plan-id> --json`.
    - Run `agent-plan ready <plan-id> --json`.
 6. If most or all tasks are ready, either add missing dependencies or explain
    why the work is intentionally parallel.
@@ -145,12 +182,16 @@ agent-plan install --global skill --json
 ```bash
 agent-plan mcp
 agent-plan version --json
+agent-plan lock status <plan-id> --json
+agent-plan lock clear <plan-id> --if-dead --json
 agent-plan help <command>
 agent-plan <command> --help
 ```
 
 - `mcp` runs the stdio MCP server and does not use `--json`.
 - `version --json` prints the CLI version.
+- Use `lock clear --if-dead` only when `lock status` or `audit` shows local
+  liveness evidence that the recorded owner process is gone.
 
 ## MCP Surface
 
@@ -168,6 +209,12 @@ Primary MCP tools:
 - `plan_add_task`
 - `plan_update_task`
 - `plan_delete_task`
+- `plan_import`
+- `plan_chain`
+- `plan_stats`
+- `plan_audit`
+- `plan_lock_status`
+- `plan_lock_clear`
 - `plan_ready`
 - `plan_next`
 - `plan_claim_next`

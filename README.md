@@ -11,6 +11,8 @@ The current Go implementation supports:
 - ordered tasks with hierarchy and dependencies
 - claim-aware task selection and claiming
 - explicit whole-plan state loading with `show`
+- transactional bulk task import/sync with dry-run validation
+- compact `stats`, `audit`, and stale-lock inspection commands
 - JSON output for agent-facing commands
 
 ## Install
@@ -104,6 +106,13 @@ agent-plan add-task <plan-id> "Freeze parity matrix" --description "Capture the 
 agent-plan update-task <plan-id> <task-id> --status in_progress
 agent-plan update-task <plan-id> <task-id> --status complete
 agent-plan delete-task <plan-id> <task-id>
+agent-plan import <plan-id> --file plan-tasks.json --dry-run --json
+agent-plan import <plan-id> --file plan-tasks.json --json
+agent-plan chain <plan-id> <first-task-id> <second-task-id> <third-task-id> --json
+agent-plan stats <plan-id> --json
+agent-plan audit <plan-id> --json
+agent-plan lock status <plan-id> --json
+agent-plan lock clear <plan-id> --if-dead --json
 agent-plan ready <plan-id> --json
 agent-plan next <plan-id> --by <agent-id> --json
 agent-plan claim-next <plan-id> --by <agent-id> --json
@@ -126,6 +135,35 @@ defines its own wire format.
 
 Use task IDs when scripting agent workflows. Plan and task names are supported
 only as exact matches; there is no fuzzy matching.
+
+For large generated plans, prefer `import --dry-run` followed by `import` over
+many individual `add-task` and `update-task` calls. Bulk import validates the
+full graph before writing and matches existing tasks by stable `key`, so
+rerunning the same input converges instead of duplicating tasks.
+
+Minimal bulk import shape:
+
+```json
+{
+  "tasks": [
+    {
+      "key": "design",
+      "name": "Design the change",
+      "description": "Choose the command and JSON contract"
+    },
+    {
+      "key": "implement",
+      "name": "Implement the change",
+      "depends_on": ["design"]
+    }
+  ],
+  "chains": [["design", "implement"]]
+}
+```
+
+`tasks[].parent` and `tasks[].depends_on` may reference either task IDs or
+stable import keys in the same payload. `chains` is a shorthand for adding
+sequential dependency edges across existing IDs or import keys.
 
 Task-level claim coordination still exists where it affects selection and
 claiming. Use `next --by <id>` when claimer affinity matters; plain `next` does
@@ -164,6 +202,12 @@ The stdio server exposes the full plan workflow:
 - `plan_add_task`
 - `plan_update_task`
 - `plan_delete_task`
+- `plan_import`
+- `plan_chain`
+- `plan_stats`
+- `plan_audit`
+- `plan_lock_status`
+- `plan_lock_clear`
 - `plan_ready`
 - `plan_next`
 - `plan_claim_next`

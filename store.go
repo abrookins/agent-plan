@@ -422,6 +422,55 @@ func (s *Store) ClaimNext(planID, by string) (*TaskRecord, error) {
 	return claimed, nil
 }
 
+func (s *Store) ChainTasks(planID string, taskIDs []string) ([]TaskRecord, error) {
+	taskIDs = normalizeIDs(taskIDs)
+	if len(taskIDs) < 2 {
+		return nil, fmt.Errorf("chain requires at least two tasks")
+	}
+	var updated []TaskRecord
+	err := s.withPlanLock(planID, func() error {
+		plan, manifest, err := s.loadPlan(planID)
+		if err != nil {
+			return err
+		}
+		for _, taskID := range taskIDs {
+			if plan.GetTask(taskID) == nil {
+				return fmt.Errorf("task not found: %s", taskID)
+			}
+		}
+		for i := 1; i < len(taskIDs); i++ {
+			current := plan.GetTask(taskIDs[i])
+			if current == nil {
+				return ErrTaskNotFound
+			}
+			deps := append([]string(nil), current.DependsOn...)
+			deps = append(deps, taskIDs[i-1])
+			normalized, err := plan.ValidateDependencyIDs(deps, current.ID)
+			if err != nil {
+				return err
+			}
+			current.DependsOn = normalized
+			current.UpdatedAt = time.Now().UTC()
+		}
+		plan.touch()
+		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
+			return err
+		}
+		updated = make([]TaskRecord, 0, len(taskIDs))
+		for _, taskID := range taskIDs {
+			task := plan.GetTask(taskID)
+			if task != nil {
+				updated = append(updated, *task)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return updated, nil
+}
+
 func (s *Store) claimTask(planID, taskID, by string) (*TaskRecord, error) {
 	by = strings.TrimSpace(by)
 	if by == "" {
@@ -945,6 +994,7 @@ func summaryFromRecord(record TaskRecord) TaskSummary {
 	return TaskSummary{
 		ID:                 record.ID,
 		Sequence:           record.Sequence,
+		ImportKey:          record.ImportKey,
 		Name:               record.Name,
 		Status:             record.Status,
 		Order:              record.Order,

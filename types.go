@@ -42,6 +42,7 @@ type TaskRecord struct {
 	ID            string     `json:"id" yaml:"id"`
 	Sequence      int        `json:"sequence" yaml:"sequence"`
 	Slug          string     `json:"slug" yaml:"slug"`
+	ImportKey     string     `json:"import_key,omitempty" yaml:"import_key,omitempty"`
 	Name          string     `json:"name" yaml:"name,omitempty"`
 	Status        Status     `json:"status" yaml:"status"`
 	Order         int        `json:"order" yaml:"order"`
@@ -64,6 +65,7 @@ type TaskRecord struct {
 type TaskSummary struct {
 	ID                 string     `json:"id"`
 	Sequence           int        `json:"sequence"`
+	ImportKey          string     `json:"import_key,omitempty"`
 	Name               string     `json:"name"`
 	Status             Status     `json:"status"`
 	Order              int        `json:"order"`
@@ -133,4 +135,90 @@ type ClaimInfo struct {
 	ClaimedAt time.Time `json:"claimed_at"`
 	Host      string    `json:"host,omitempty"`
 	PID       int       `json:"pid,omitempty"`
+}
+
+type BulkImportSpec struct {
+	Tasks  []BulkImportTaskSpec `json:"tasks"`
+	Chains [][]string           `json:"chains,omitempty"`
+}
+
+type BulkImportTaskSpec struct {
+	Key         string   `json:"key,omitempty"`
+	ID          string   `json:"id,omitempty"`
+	Name        string   `json:"name"`
+	Description *string  `json:"description,omitempty"`
+	Parent      *string  `json:"parent,omitempty"`
+	DependsOn   []string `json:"depends_on,omitempty"`
+	Status      string   `json:"status,omitempty"`
+	ClaimedBy   *string  `json:"claimed_by,omitempty"`
+	Order       *int     `json:"order,omitempty"`
+}
+
+type BulkImportOptions struct {
+	DryRun bool
+}
+
+type BulkImportReport struct {
+	PlanID    string             `json:"plan_id"`
+	DryRun    bool               `json:"dry_run"`
+	Total     int                `json:"total"`
+	Created   int                `json:"created"`
+	Updated   int                `json:"updated"`
+	Unchanged int                `json:"unchanged"`
+	Changes   []BulkImportChange `json:"changes"`
+	Errors    []string           `json:"errors,omitempty"`
+}
+
+type BulkImportChange struct {
+	Action string `json:"action"`
+	Key    string `json:"key,omitempty"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+}
+
+type PlanStats struct {
+	PlanID          string         `json:"plan_id"`
+	Name            string         `json:"name"`
+	Total           int            `json:"total"`
+	StatusCounts    map[Status]int `json:"status_counts"`
+	RootCount       int            `json:"root_count"`
+	ParentedCount   int            `json:"parented_count"`
+	DependencyCount int            `json:"dependency_count"`
+	ReadyCount      int            `json:"ready_count"`
+	ClaimedCount    int            `json:"claimed_count"`
+	HistoryCount    int            `json:"history_count"`
+	NextSequence    int            `json:"next_sequence"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+}
+
+type AuditReport struct {
+	PlanID   string         `json:"plan_id"`
+	Stats    PlanStats      `json:"stats"`
+	Findings []AuditFinding `json:"findings"`
+}
+
+type AuditFinding struct {
+	Severity string `json:"severity"`
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+	TaskID   string `json:"task_id,omitempty"`
+	Path     string `json:"path,omitempty"`
+}
+
+type LockStatus struct {
+	PlanID       string  `json:"plan_id"`
+	Path         string  `json:"path"`
+	Exists       bool    `json:"exists"`
+	PID          int     `json:"pid,omitempty"`
+	Host         string  `json:"host,omitempty"`
+	CreatedAt    string  `json:"created_at,omitempty"`
+	AgeSeconds   float64 `json:"age_seconds,omitempty"`
+	OwnerAlive   *bool   `json:"owner_alive,omitempty"`
+	CurrentHost  string  `json:"current_host,omitempty"`
+	OwnerIsLocal bool    `json:"owner_is_local"`
+}
+
+type LockClearResult struct {
+	Cleared bool       `json:"cleared"`
+	Status  LockStatus `json:"status"`
 }

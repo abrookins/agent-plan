@@ -364,7 +364,8 @@ func (p *Plan) ApplyTaskUpdate(taskID string, opts TaskUpdateOptions) (*TaskReco
 	}
 	if opts.ClearDependencies {
 		task.DependsOn = nil
-	} else if opts.DependsOn != nil {
+	}
+	if opts.DependsOn != nil {
 		deps, err := p.ValidateDependencyIDs(opts.DependsOn, task.ID)
 		if err != nil {
 			return nil, err

@@ -259,6 +259,322 @@ func TestCLIUpdateTaskOrderReturnsUpdatedTask(t *testing.T) {
 	}
 }
 
+func TestCLIImportDryRunApplyAndRerun(t *testing.T) {
+	root := t.TempDir()
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"init", "--dir", root}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("init code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"create", "--dir", root, "Import Plan", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("create code = %d stderr=%s", code, stderr.String())
+	}
+	var created Plan
+	if err := json.Unmarshal(stdout.Bytes(), &created); err != nil {
+		t.Fatalf("Unmarshal(create) error = %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	spec := `{
+	  "tasks": [
+	    {"key": "phase", "name": "Phase 1", "description": "Parent task"},
+	    {"key": "design", "name": "Design", "parent": "phase"},
+	    {"key": "impl", "name": "Implement", "parent": "phase", "depends_on": ["design"], "claimed_by": "sess-1"},
+	    {"key": "verify", "name": "Verify", "parent": "phase"}
+	  ],
+	  "chains": [["impl", "verify"]]
+	}`
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"import", "--dir", root, created.ID, "--dry-run", "--json"}, strings.NewReader(spec), &stdout, &stderr); code != 0 {
+		t.Fatalf("import dry-run code = %d stderr=%s", code, stderr.String())
+	}
+	var dryRun BulkImportReport
+	if err := json.Unmarshal(stdout.Bytes(), &dryRun); err != nil {
+		t.Fatalf("Unmarshal(dry-run) error = %v", err)
+	}
+	if !dryRun.DryRun || dryRun.Created != 4 {
+		t.Fatalf("dryRun = %#v", dryRun)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"show", "--dir", root, created.ID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("show after dry-run code = %d stderr=%s", code, stderr.String())
+	}
+	var shown Plan
+	if err := json.Unmarshal(stdout.Bytes(), &shown); err != nil {
+		t.Fatalf("Unmarshal(show after dry-run) error = %v", err)
+	}
+	if len(shown.Tasks) != 0 {
+		t.Fatalf("dry-run mutated plan: %#v", shown.Tasks)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"import", "--dir", root, created.ID, "--json"}, strings.NewReader(spec), &stdout, &stderr); code != 0 {
+		t.Fatalf("import apply code = %d stderr=%s", code, stderr.String())
+	}
+	var applied BulkImportReport
+	if err := json.Unmarshal(stdout.Bytes(), &applied); err != nil {
+		t.Fatalf("Unmarshal(apply) error = %v", err)
+	}
+	if applied.Created != 4 || applied.Updated != 0 || applied.Unchanged != 0 {
+		t.Fatalf("applied = %#v", applied)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"import", "--dir", root, created.ID, "--json"}, strings.NewReader(spec), &stdout, &stderr); code != 0 {
+		t.Fatalf("import rerun code = %d stderr=%s", code, stderr.String())
+	}
+	var rerun BulkImportReport
+	if err := json.Unmarshal(stdout.Bytes(), &rerun); err != nil {
+		t.Fatalf("Unmarshal(rerun) error = %v", err)
+	}
+	if rerun.Created != 0 || rerun.Updated != 0 || rerun.Unchanged != 4 {
+		t.Fatalf("rerun = %#v", rerun)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"show", "--dir", root, created.ID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("show code = %d stderr=%s", code, stderr.String())
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &shown); err != nil {
+		t.Fatalf("Unmarshal(show) error = %v", err)
+	}
+	if len(shown.Tasks) != 4 {
+		t.Fatalf("shown task count = %d", len(shown.Tasks))
+	}
+	impl := nextTaskByImportKey(t, shown, "impl")
+	verify := nextTaskByImportKey(t, shown, "verify")
+	if impl.ClaimedBy != "sess-1" {
+		t.Fatalf("impl claimed_by = %q", impl.ClaimedBy)
+	}
+	if len(verify.DependsOn) != 1 || verify.DependsOn[0] != impl.ID {
+		t.Fatalf("verify deps = %#v, want %s", verify.DependsOn, impl.ID)
+	}
+}
+
+func TestCLIOperationalStatsAuditAndLockCommands(t *testing.T) {
+	root := t.TempDir()
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"init", "--dir", root}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("init code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"create", "--dir", root, "Ops Plan", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("create code = %d stderr=%s", code, stderr.String())
+	}
+	var created Plan
+	if err := json.Unmarshal(stdout.Bytes(), &created); err != nil {
+		t.Fatalf("Unmarshal(create) error = %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"add-task", "--dir", root, created.ID, "Duplicate", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("add-task first code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCLI(context.Background(), "agent-plan", []string{"add-task", "--dir", root, created.ID, "Duplicate", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("add-task second code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"stats", "--dir", root, created.ID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("stats code = %d stderr=%s", code, stderr.String())
+	}
+	var stats PlanStats
+	if err := json.Unmarshal(stdout.Bytes(), &stats); err != nil {
+		t.Fatalf("Unmarshal(stats) error = %v", err)
+	}
+	if stats.Total != 2 || stats.ReadyCount != 2 {
+		t.Fatalf("stats = %#v", stats)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"audit", "--dir", root, created.ID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("audit code = %d stderr=%s", code, stderr.String())
+	}
+	var audit AuditReport
+	if err := json.Unmarshal(stdout.Bytes(), &audit); err != nil {
+		t.Fatalf("Unmarshal(audit) error = %v", err)
+	}
+	if !hasAuditFinding(audit, "duplicate_task_name") {
+		t.Fatalf("audit findings = %#v", audit.Findings)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	store, err := Open(root)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	lockPayload := `{"pid":999999999,"host":"","created_at":"2026-01-01T00:00:00Z"}`
+	if err := os.WriteFile(store.planLockPath(created.ID), []byte(lockPayload), defaultFilePerm); err != nil {
+		t.Fatalf("WriteFile(lock) error = %v", err)
+	}
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"lock", "status", "--dir", root, created.ID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("lock status code = %d stderr=%s", code, stderr.String())
+	}
+	var lockStatus LockStatus
+	if err := json.Unmarshal(stdout.Bytes(), &lockStatus); err != nil {
+		t.Fatalf("Unmarshal(lock status) error = %v", err)
+	}
+	if !lockStatus.Exists || lockStatus.OwnerAlive == nil || *lockStatus.OwnerAlive {
+		t.Fatalf("lockStatus = %#v", lockStatus)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"lock", "clear", "--dir", root, created.ID, "--if-dead", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("lock clear code = %d stderr=%s stdout=%s", code, stderr.String(), stdout.String())
+	}
+	var clearResult LockClearResult
+	if err := json.Unmarshal(stdout.Bytes(), &clearResult); err != nil {
+		t.Fatalf("Unmarshal(lock clear) error = %v", err)
+	}
+	if !clearResult.Cleared {
+		t.Fatalf("clearResult = %#v", clearResult)
+	}
+}
+
+func TestCLIChainCommandNarrowsReadyTasks(t *testing.T) {
+	root := t.TempDir()
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"init", "--dir", root}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("init code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"create", "--dir", root, "Chain Plan", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("create code = %d stderr=%s", code, stderr.String())
+	}
+	var created Plan
+	if err := json.Unmarshal(stdout.Bytes(), &created); err != nil {
+		t.Fatalf("Unmarshal(create) error = %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	for _, name := range []string{"A", "B", "C"} {
+		if code := runCLI(context.Background(), "agent-plan", []string{"add-task", "--dir", root, created.ID, name, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+			t.Fatalf("add-task %s code = %d stderr=%s", name, code, stderr.String())
+		}
+		stdout.Reset()
+		stderr.Reset()
+	}
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"chain", "--dir", root, created.ID, "A", "B", "C", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("chain code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCLI(context.Background(), "agent-plan", []string{"chain", "--dir", root, created.ID, "A", "B", "C", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("chain rerun code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"ready", "--dir", root, created.ID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("ready code = %d stderr=%s", code, stderr.String())
+	}
+	var ready []map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &ready); err != nil {
+		t.Fatalf("Unmarshal(ready) error = %v", err)
+	}
+	if len(ready) != 1 || ready[0]["name"] != "A" {
+		t.Fatalf("ready = %#v", ready)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"show", "--dir", root, created.ID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("show code = %d stderr=%s", code, stderr.String())
+	}
+	var shown Plan
+	if err := json.Unmarshal(stdout.Bytes(), &shown); err != nil {
+		t.Fatalf("Unmarshal(show) error = %v", err)
+	}
+	taskA := nextTaskByName(t, shown, "A")
+	taskB := nextTaskByName(t, shown, "B")
+	taskC := nextTaskByName(t, shown, "C")
+	if len(taskB.DependsOn) != 1 || taskB.DependsOn[0] != taskA.ID {
+		t.Fatalf("taskB deps = %#v, want %s", taskB.DependsOn, taskA.ID)
+	}
+	if len(taskC.DependsOn) != 1 || taskC.DependsOn[0] != taskB.ID {
+		t.Fatalf("taskC deps = %#v, want %s", taskC.DependsOn, taskB.ID)
+	}
+}
+
+func TestCLIUpdateTaskClearDependenciesThenDependsOnReplacesDependencies(t *testing.T) {
+	root := t.TempDir()
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"init", "--dir", root}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("init code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCLI(context.Background(), "agent-plan", []string{"create", "--dir", root, "Deps Plan", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("create code = %d stderr=%s", code, stderr.String())
+	}
+	var created Plan
+	if err := json.Unmarshal(stdout.Bytes(), &created); err != nil {
+		t.Fatalf("Unmarshal(create) error = %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	var tasks []TaskRecord
+	for _, name := range []string{"A", "B", "C"} {
+		if code := runCLI(context.Background(), "agent-plan", []string{"add-task", "--dir", root, created.ID, name, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+			t.Fatalf("add-task %s code = %d stderr=%s", name, code, stderr.String())
+		}
+		var task TaskRecord
+		if err := json.Unmarshal(stdout.Bytes(), &task); err != nil {
+			t.Fatalf("Unmarshal(add-task %s) error = %v", name, err)
+		}
+		tasks = append(tasks, task)
+		stdout.Reset()
+		stderr.Reset()
+	}
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"update-task", "--dir", root, created.ID, tasks[2].ID, "--depends-on", tasks[0].ID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("update-task initial deps code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCLI(context.Background(), "agent-plan", []string{"update-task", "--dir", root, created.ID, tasks[2].ID, "--clear-dependencies", "--depends-on", tasks[1].ID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("update-task replace deps code = %d stderr=%s", code, stderr.String())
+	}
+	var updated TaskRecord
+	if err := json.Unmarshal(stdout.Bytes(), &updated); err != nil {
+		t.Fatalf("Unmarshal(update-task replace deps) error = %v", err)
+	}
+	if len(updated.DependsOn) != 1 || updated.DependsOn[0] != tasks[1].ID {
+		t.Fatalf("updated deps = %#v, want %s", updated.DependsOn, tasks[1].ID)
+	}
+}
+
 func TestCLIConfirmDeleteAndErrorPaths(t *testing.T) {
 	root := t.TempDir()
 	stdout := bytes.Buffer{}
@@ -494,4 +810,35 @@ func TestCLIVersion(t *testing.T) {
 	if !strings.Contains(stdout.String(), `"version": "`+Version+`"`) {
 		t.Fatalf("--version --json stdout = %q", stdout.String())
 	}
+}
+
+func nextTaskByImportKey(t *testing.T, plan Plan, key string) TaskRecord {
+	t.Helper()
+	for _, task := range plan.Tasks {
+		if task.ImportKey == key {
+			return task
+		}
+	}
+	t.Fatalf("task with import key %q not found in %#v", key, plan.Tasks)
+	return TaskRecord{}
+}
+
+func nextTaskByName(t *testing.T, plan Plan, name string) TaskRecord {
+	t.Helper()
+	for _, task := range plan.Tasks {
+		if task.Name == name {
+			return task
+		}
+	}
+	t.Fatalf("task with name %q not found in %#v", name, plan.Tasks)
+	return TaskRecord{}
+}
+
+func hasAuditFinding(report AuditReport, code string) bool {
+	for _, finding := range report.Findings {
+		if finding.Code == code {
+			return true
+		}
+	}
+	return false
 }

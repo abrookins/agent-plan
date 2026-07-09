@@ -83,6 +83,46 @@ func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 			InputSchema: schema(rootSchema, map[string]any{"plan": planSchema}, "plan"),
 		},
 		{
+			Name:        "plan_import",
+			Description: "Validate and import a structured task graph into a plan.",
+			InputSchema: schema(rootSchema, map[string]any{
+				"plan":    planSchema,
+				"spec":    map[string]any{"type": "object"},
+				"dry_run": map[string]any{"type": "boolean"},
+			}, "plan", "spec"),
+		},
+		{
+			Name:        "plan_stats",
+			Description: "Show compact plan counts without returning every task.",
+			InputSchema: schema(rootSchema, map[string]any{"plan": planSchema}, "plan"),
+		},
+		{
+			Name:        "plan_audit",
+			Description: "Audit a plan for structural and coordination problems.",
+			InputSchema: schema(rootSchema, map[string]any{"plan": planSchema}, "plan"),
+		},
+		{
+			Name:        "plan_lock_status",
+			Description: "Inspect a plan lock.",
+			InputSchema: schema(rootSchema, map[string]any{"plan": planSchema}, "plan"),
+		},
+		{
+			Name:        "plan_lock_clear",
+			Description: "Clear a plan lock only when if_dead is true and the owner is locally proven dead.",
+			InputSchema: schema(rootSchema, map[string]any{
+				"plan":    planSchema,
+				"if_dead": map[string]any{"type": "boolean"},
+			}, "plan", "if_dead"),
+		},
+		{
+			Name:        "plan_chain",
+			Description: "Add dependency edges so each listed task depends on the previous one.",
+			InputSchema: schema(rootSchema, map[string]any{
+				"plan":  planSchema,
+				"tasks": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			}, "plan", "tasks"),
+		},
+		{
 			Name:        "plan_add_task",
 			Description: "Add a task to a plan.",
 			InputSchema: schema(rootSchema, map[string]any{
@@ -209,6 +249,90 @@ func (s *MCPServer) CallTool(_ context.Context, name string, args map[string]any
 			return toolErr(err)
 		}
 		return toolOK("plan deleted", map[string]any{"deleted": deleted, "id": plan.ID})
+	case "plan_import":
+		plan, err := resolvePlanFromArgs(store, args)
+		if err != nil {
+			return toolErr(err)
+		}
+		spec, err := bulkImportSpecFromArgs(args)
+		if err != nil {
+			return toolErr(err)
+		}
+		report, err := store.ImportTasks(plan.ID, spec, BulkImportOptions{DryRun: optionalBool(args, "dry_run")})
+		if err != nil {
+			if report != nil {
+				return mcpproto.ToolResult{
+					IsError:           true,
+					StructuredContent: report,
+					Content: []mcpproto.TextContent{
+						{Type: "text", Text: err.Error()},
+					},
+				}
+			}
+			return toolErr(err)
+		}
+		return toolOK("plan imported", report)
+	case "plan_stats":
+		plan, err := resolvePlanFromArgs(store, args)
+		if err != nil {
+			return toolErr(err)
+		}
+		stats, err := store.Stats(plan.ID)
+		if err != nil {
+			return toolErr(err)
+		}
+		return toolOK("plan stats loaded", stats)
+	case "plan_audit":
+		plan, err := resolvePlanFromArgs(store, args)
+		if err != nil {
+			return toolErr(err)
+		}
+		report, err := store.Audit(plan.ID)
+		if err != nil {
+			return toolErr(err)
+		}
+		return toolOK("plan audit loaded", report)
+	case "plan_lock_status":
+		plan, err := resolvePlanFromArgs(store, args)
+		if err != nil {
+			return toolErr(err)
+		}
+		status, err := store.PlanLockStatus(plan.ID)
+		if err != nil {
+			return toolErr(err)
+		}
+		return toolOK("plan lock status loaded", status)
+	case "plan_lock_clear":
+		plan, err := resolvePlanFromArgs(store, args)
+		if err != nil {
+			return toolErr(err)
+		}
+		if !optionalBool(args, "if_dead") {
+			return toolErr(fmt.Errorf("plan_lock_clear requires if_dead=true"))
+		}
+		result, err := store.ClearPlanLockIfDead(plan.ID)
+		if err != nil {
+			return toolErr(err)
+		}
+		return toolOK("plan lock clear attempted", result)
+	case "plan_chain":
+		plan, err := resolvePlanFromArgs(store, args)
+		if err != nil {
+			return toolErr(err)
+		}
+		taskIDs := make([]string, 0)
+		for _, ref := range optionalStringSlice(args, "tasks") {
+			task, err := resolveTask(plan, ref, "task")
+			if err != nil {
+				return toolErr(err)
+			}
+			taskIDs = append(taskIDs, task.ID)
+		}
+		updated, err := store.ChainTasks(plan.ID, taskIDs)
+		if err != nil {
+			return toolErr(err)
+		}
+		return toolOK("tasks chained", updated)
 	case "plan_add_task":
 		plan, err := resolvePlanFromArgs(store, args)
 		if err != nil {
@@ -437,6 +561,22 @@ func planUpdateOptionsFromArgs(args map[string]any) (PlanUpdateOptions, error) {
 		opts.SpecPath = &value
 	}
 	return opts, nil
+}
+
+func bulkImportSpecFromArgs(args map[string]any) (BulkImportSpec, error) {
+	raw, ok := args["spec"]
+	if !ok || raw == nil {
+		return BulkImportSpec{}, fmt.Errorf("spec is required")
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return BulkImportSpec{}, err
+	}
+	var spec BulkImportSpec
+	if err := json.Unmarshal(data, &spec); err != nil {
+		return BulkImportSpec{}, err
+	}
+	return spec, nil
 }
 
 func taskUpdateOptionsFromArgs(plan *Plan, taskID string, args map[string]any) (TaskUpdateOptions, error) {

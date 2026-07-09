@@ -122,6 +122,80 @@ func TestStoreMultiPlanWorkflow(t *testing.T) {
 	}
 }
 
+func TestStoreImportValidationDoesNotMutate(t *testing.T) {
+	root := t.TempDir()
+	store, err := Init(root)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	plan, err := store.CreatePlan("Import Validation", "", "")
+	if err != nil {
+		t.Fatalf("CreatePlan() error = %v", err)
+	}
+	seed, err := store.AddTask(plan.ID, "Seed", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddTask(seed) error = %v", err)
+	}
+
+	report, err := store.ImportTasks(plan.ID, BulkImportSpec{
+		Tasks: []BulkImportTaskSpec{
+			{Key: "bad", Name: "Bad", DependsOn: []string{"missing"}},
+		},
+	}, BulkImportOptions{})
+	if err == nil {
+		t.Fatal("ImportTasks() should fail validation")
+	}
+	if report == nil || len(report.Errors) == 0 {
+		t.Fatalf("report = %#v err=%v", report, err)
+	}
+
+	loaded, err := store.GetPlan(plan.ID)
+	if err != nil {
+		t.Fatalf("GetPlan() error = %v", err)
+	}
+	if len(loaded.Tasks) != 1 || loaded.Tasks[0].ID != seed.ID {
+		t.Fatalf("loaded after failed import = %#v", loaded.Tasks)
+	}
+}
+
+func TestStoreImportPersistenceFailureLeavesIndexedPlanUnchanged(t *testing.T) {
+	root := t.TempDir()
+	store, err := Init(root)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	plan, err := store.CreatePlan("Import Failure", "", "")
+	if err != nil {
+		t.Fatalf("CreatePlan() error = %v", err)
+	}
+	seed, err := store.AddTask(plan.ID, "Seed", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddTask(seed) error = %v", err)
+	}
+
+	originalJSONMarshalIndent := jsonMarshalIndent
+	jsonMarshalIndent = func(v any, prefix, indent string) ([]byte, error) {
+		return nil, errors.New("forced persist failure")
+	}
+	_, err = store.ImportTasks(plan.ID, BulkImportSpec{
+		Tasks: []BulkImportTaskSpec{
+			{Key: "new", Name: "New"},
+		},
+	}, BulkImportOptions{})
+	jsonMarshalIndent = originalJSONMarshalIndent
+	if err == nil {
+		t.Fatal("ImportTasks() should fail persistence")
+	}
+
+	loaded, err := store.GetPlan(plan.ID)
+	if err != nil {
+		t.Fatalf("GetPlan() error = %v", err)
+	}
+	if len(loaded.Tasks) != 1 || loaded.Tasks[0].ID != seed.ID {
+		t.Fatalf("loaded after failed persistence = %#v", loaded.Tasks)
+	}
+}
+
 func TestLegacyStoreIsNotMigrated(t *testing.T) {
 	root := t.TempDir()
 	metaDir := filepath.Join(root, metaDirName)
