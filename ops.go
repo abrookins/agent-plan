@@ -13,27 +13,176 @@ import (
 )
 
 func (s *Store) Stats(planID string) (PlanStats, error) {
-	plan, manifest, err := s.loadPlan(planID)
+	record, err := s.loadPlanRecord(planID)
 	if err != nil {
 		return PlanStats{}, err
 	}
-	return statsForPlan(plan, manifest), nil
+	manifest, err := s.loadManifest(planID)
+	if err != nil {
+		return PlanStats{
+			PlanID:       record.ID,
+			Name:         unicodePreview(record.Name, taskPreviewRunes),
+			Version:      record.Version,
+			Health:       "unreadable",
+			FindingCount: 1,
+			StatusCounts: map[Status]int{},
+			UpdatedAt:    record.UpdatedAt.UTC(),
+		}, nil
+	}
+	stats := statsForManifest(record, manifest)
+	for _, task := range manifest.Tasks {
+		path, err := s.resolveManifestRecordPath(planID, task.Path, false)
+		if err != nil {
+			stats.FindingCount++
+			continue
+		}
+		if _, err := statFunc(path); err != nil {
+			stats.FindingCount++
+		}
+		if taskSummaryHasActiveClaim(task) {
+			claimPath, err := s.resolveManifestRecordPath(planID, task.ClaimPath, true)
+			if err != nil {
+				stats.FindingCount++
+			} else if _, err := statFunc(claimPath); err != nil {
+				stats.FindingCount++
+			}
+		}
+	}
+	if stats.FindingCount > 0 {
+		stats.Health = "degraded"
+	}
+	return stats, nil
 }
 
 func (s *Store) Audit(planID string) (AuditReport, error) {
-	plan, manifest, err := s.loadPlan(planID)
+	record, err := s.loadPlanRecord(planID)
 	if err != nil {
 		return AuditReport{}, err
 	}
-	stats := statsForPlan(plan, manifest)
+	manifest, err := s.loadManifest(planID)
+	if err != nil {
+		finding := AuditFinding{
+			Severity: "error",
+			Code:     errorObject(err).Code,
+			Message:  errorObject(err).Message,
+			Path:     errorObject(err).Path,
+		}
+		return AuditReport{
+			PlanID: planID,
+			Stats: PlanStats{
+				PlanID:       record.ID,
+				Name:         record.Name,
+				Version:      record.Version,
+				Health:       "unreadable",
+				FindingCount: 1,
+				StatusCounts: map[Status]int{},
+				UpdatedAt:    record.UpdatedAt.UTC(),
+			},
+			Findings: []AuditFinding{finding},
+		}, nil
+	}
+	plan := &Plan{
+		ID:          record.ID,
+		Name:        record.Name,
+		Description: record.Description,
+		SpecPath:    record.SpecPath,
+		CreatedAt:   record.CreatedAt.UTC(),
+		UpdatedAt:   record.UpdatedAt.UTC(),
+		Version:     record.Version,
+		Tasks:       make([]TaskRecord, 0, len(manifest.Tasks)),
+	}
+	stats := statsForManifest(record, manifest)
 	report := AuditReport{
 		PlanID:   plan.ID,
 		Stats:    stats,
 		Findings: []AuditFinding{},
 	}
+	knownTaskPaths := make(map[string]string, len(manifest.Tasks))
+	knownClaimPaths := make(map[string]TaskSummary, len(manifest.Tasks))
+	for _, summary := range manifest.Tasks {
+		recordPath, err := s.resolveManifestRecordPath(planID, summary.Path, false)
+		if err != nil {
+			report.Findings = append(report.Findings, AuditFinding{
+				Severity: "error",
+				Code:     ErrorCodePathOutsidePlan,
+				Message:  err.Error(),
+				TaskID:   summary.ID,
+				Path:     summary.Path,
+			})
+			continue
+		}
+		cleanedPath := filepath.Clean(recordPath)
+		if previousTaskID, duplicate := knownTaskPaths[cleanedPath]; duplicate {
+			report.Findings = append(report.Findings, AuditFinding{
+				Severity: "error",
+				Code:     "duplicate_record_path",
+				Message:  fmt.Sprintf("task record path is also used by %s", previousTaskID),
+				TaskID:   summary.ID,
+				Path:     summary.Path,
+			})
+		} else {
+			knownTaskPaths[cleanedPath] = summary.ID
+		}
+		task, err := s.readTaskRecord(recordPath)
+		if err != nil {
+			code := "task_record_unreadable"
+			message := "task record is unreadable"
+			if errors.Is(err, os.ErrNotExist) {
+				code = "missing_task_record"
+				message = "task record is missing"
+			}
+			report.Findings = append(report.Findings, AuditFinding{
+				Severity: "error",
+				Code:     code,
+				Message:  message,
+				TaskID:   summary.ID,
+				Path:     summary.Path,
+			})
+			continue
+		}
+		task.Path = summary.Path
+		task.ClaimPath = summary.ClaimPath
+		plan.Tasks = append(plan.Tasks, task)
+		if taskSummaryHasActiveClaim(summary) {
+			claimPath, err := s.resolveManifestRecordPath(planID, summary.ClaimPath, true)
+			if err != nil {
+				report.Findings = append(report.Findings, AuditFinding{
+					Severity: "error",
+					Code:     ErrorCodePathOutsidePlan,
+					Message:  err.Error(),
+					TaskID:   summary.ID,
+					Path:     summary.ClaimPath,
+				})
+			} else {
+				knownClaimPaths[filepath.Clean(claimPath)] = summary
+				data, err := readFileFunc(claimPath)
+				if err != nil {
+					report.Findings = append(report.Findings, AuditFinding{
+						Severity: "error",
+						Code:     "missing_claim_record",
+						Message:  "active task claim is missing",
+						TaskID:   summary.ID,
+						Path:     summary.ClaimPath,
+					})
+				} else {
+					var claim ClaimInfo
+					if json.Unmarshal(data, &claim) != nil || claim.By != summary.ClaimedBy {
+						report.Findings = append(report.Findings, AuditFinding{
+							Severity: "error",
+							Code:     "claim_state_mismatch",
+							Message:  "claim record disagrees with manifest state",
+							TaskID:   summary.ID,
+							Path:     summary.ClaimPath,
+						})
+					}
+				}
+			}
+		}
+	}
 	report.Findings = append(report.Findings, auditTaskGraph(plan)...)
-	report.Findings = append(report.Findings, s.auditTaskFiles(plan, manifest)...)
-	report.Findings = append(report.Findings, s.auditClaimFiles(plan)...)
+	report.Findings = append(report.Findings, s.auditOrphanTaskFiles(planID, knownTaskPaths)...)
+	report.Findings = append(report.Findings, s.auditOrphanClaimFiles(planID, knownClaimPaths)...)
+	storageFindingCount := len(report.Findings)
 	if lockStatus, err := s.PlanLockStatus(plan.ID); err == nil && lockStatus.Exists && lockStatus.OwnerAlive != nil && !*lockStatus.OwnerAlive {
 		report.Findings = append(report.Findings, AuditFinding{
 			Severity: "warning",
@@ -48,6 +197,10 @@ func (s *Store) Audit(planID string) (AuditReport, error) {
 			Code:     "ready_count_high",
 			Message:  fmt.Sprintf("%d of %d tasks are ready; dependency edges may be missing", stats.ReadyCount, stats.Total),
 		})
+	}
+	report.Stats.FindingCount = storageFindingCount
+	if storageFindingCount > 0 {
+		report.Stats.Health = "degraded"
 	}
 	sortAuditFindings(report.Findings)
 	return report, nil
@@ -118,6 +271,8 @@ func statsForPlan(plan *Plan, manifest *Manifest) PlanStats {
 	stats := PlanStats{
 		PlanID:       plan.ID,
 		Name:         plan.Name,
+		Version:      plan.Version,
+		Health:       "healthy",
 		Total:        len(plan.Tasks),
 		StatusCounts: map[Status]int{},
 		UpdatedAt:    plan.UpdatedAt,
@@ -143,6 +298,54 @@ func statsForPlan(plan *Plan, manifest *Manifest) PlanStats {
 		}
 	}
 	stats.ReadyCount = len(plan.ReadyTasks())
+	return stats
+}
+
+func statsForManifest(record PlanRecord, manifest Manifest) PlanStats {
+	stats := PlanStats{
+		PlanID:       record.ID,
+		Name:         unicodePreview(record.Name, taskPreviewRunes),
+		Version:      record.Version,
+		Health:       "healthy",
+		Total:        len(manifest.Tasks),
+		StatusCounts: map[Status]int{},
+		NextSequence: manifest.NextSequence,
+		UpdatedAt:    record.UpdatedAt.UTC(),
+	}
+	statuses := make(map[string]Status, len(manifest.Tasks))
+	for _, task := range manifest.Tasks {
+		statuses[task.ID] = task.Status
+		stats.StatusCounts[task.Status]++
+		if task.ParentID == "" {
+			stats.RootCount++
+		} else {
+			stats.ParentedCount++
+		}
+		if len(task.DependsOn) > 0 {
+			stats.DependencyCount++
+		}
+		if task.ClaimedBy != "" {
+			stats.ClaimedCount++
+		}
+		if task.Status == StatusComplete {
+			stats.HistoryCount++
+		}
+	}
+	for _, task := range manifest.Tasks {
+		if task.Status != StatusNotStarted || task.ClaimedBy != "" {
+			continue
+		}
+		ready := true
+		for _, dependencyID := range task.DependsOn {
+			if statuses[dependencyID] != StatusComplete {
+				ready = false
+				break
+			}
+		}
+		if ready {
+			stats.ReadyCount++
+		}
+	}
 	return stats
 }
 
@@ -206,18 +409,9 @@ func auditTaskGraph(plan *Plan) []AuditFinding {
 	return findings
 }
 
-func (s *Store) auditTaskFiles(plan *Plan, manifest *Manifest) []AuditFinding {
-	if manifest == nil {
-		return nil
-	}
-	knownPaths := map[string]struct{}{}
-	for _, summary := range manifest.Tasks {
-		if summary.Path != "" {
-			knownPaths[filepath.Clean(summary.Path)] = struct{}{}
-		}
-	}
+func (s *Store) auditOrphanTaskFiles(planID string, knownPaths map[string]string) []AuditFinding {
 	findings := []AuditFinding{}
-	for _, dir := range []string{s.planTasksDir(plan.ID), s.planHistoryDir(plan.ID)} {
+	for _, dir := range []string{s.planTasksDir(planID), s.planHistoryDir(planID)} {
 		entries, err := readDirFunc(dir)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
@@ -240,46 +434,48 @@ func (s *Store) auditTaskFiles(plan *Plan, manifest *Manifest) []AuditFinding {
 			}
 			findings = append(findings, AuditFinding{
 				Severity: "warning",
-				Code:     "orphan_task_file",
-				Message:  "task file is not referenced by the manifest",
-				Path:     path,
+				Code:     "orphan_task_record",
+				Message:  "task record is not referenced by the manifest",
+				Path:     auditRelativePath(s.planDir(planID), path),
 			})
 		}
 	}
 	return findings
 }
 
-func (s *Store) auditClaimFiles(plan *Plan) []AuditFinding {
-	activeClaims := map[string]string{}
-	for _, task := range plan.Tasks {
-		if task.ClaimedBy != "" && task.Status != StatusComplete && task.Status != StatusCancelled && task.Status != StatusBlocked {
-			activeClaims[filepath.Clean(s.claimPath(plan.ID, task.ID))] = task.ID
-		}
-	}
-	entries, err := readDirFunc(s.planTasksDir(plan.ID))
+func (s *Store) auditOrphanClaimFiles(planID string, activeClaims map[string]TaskSummary) []AuditFinding {
+	entries, err := readDirFunc(s.planTasksDir(planID))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return []AuditFinding{{Severity: "error", Code: "read_dir_failed", Message: err.Error(), Path: s.planTasksDir(plan.ID)}}
+		return []AuditFinding{{Severity: "error", Code: "read_dir_failed", Message: err.Error(), Path: tasksDirName}}
 	}
 	findings := []AuditFinding{}
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".claim") {
 			continue
 		}
-		path := filepath.Join(s.planTasksDir(plan.ID), entry.Name())
+		path := filepath.Join(s.planTasksDir(planID), entry.Name())
 		if _, ok := activeClaims[filepath.Clean(path)]; ok {
 			continue
 		}
 		findings = append(findings, AuditFinding{
 			Severity: "warning",
-			Code:     "orphan_claim_file",
+			Code:     "orphan_claim",
 			Message:  "claim file is not referenced by an active claimed task",
-			Path:     path,
+			Path:     filepath.ToSlash(filepath.Join(tasksDirName, entry.Name())),
 		})
 	}
 	return findings
+}
+
+func auditRelativePath(planDir, path string) string {
+	relative, err := filepath.Rel(planDir, path)
+	if err != nil {
+		return filepath.Base(path)
+	}
+	return filepath.ToSlash(relative)
 }
 
 func lockOwnerIsLocal(ownerHost, currentHost string) bool {

@@ -100,6 +100,7 @@ agent-plan create "Go parity" --description "Track feature work"
 agent-plan list
 agent-plan get <plan-id> --json
 agent-plan show <plan-id> --json
+agent-plan show <plan-id> --mermaid
 agent-plan update <plan-id> --spec-path docs/parity-design.md
 agent-plan delete <plan-id> --yes
 agent-plan add-task <plan-id> "Freeze parity matrix" --description "Capture the target surface"
@@ -123,7 +124,9 @@ agent-plan version
 
 `show` is the explicit whole-plan snapshot command for agents that want the
 current plan plus all tasks in one call. `get` returns the same plan payload and
-remains available for parity with the existing surface.
+remains available for parity with the existing surface. Both commands accept
+`--mermaid` to print a Mermaid flowchart with task dependencies and hierarchy;
+`--json` and `--mermaid` are mutually exclusive.
 
 All commands accept `--dir <workspace-root>`. When `--dir` is omitted, the CLI
 falls back to `AGENT_PLAN_DIR` before using the current working directory.

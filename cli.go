@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -25,6 +26,19 @@ func runCLI(ctx context.Context, program string, args []string, stdin io.Reader,
 	if len(args) == 0 {
 		printUsage(stderr, program)
 		return 1
+	}
+	cleanedArgs, pretty, err := extractPrettyFlag(args)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	args = cleanedArgs
+	if pretty && !isFlagPassed(args, "--json") {
+		fmt.Fprintln(stderr, "--pretty requires --json")
+		return 1
+	}
+	if pretty {
+		stdout = cliJSONWriter{Writer: stdout, pretty: true}
 	}
 	if len(args) > 1 && isHelpArg(args[1]) {
 		if printCommandHelp(stdout, program, args[0]) {
@@ -56,6 +70,8 @@ func runCLI(ctx context.Context, program string, args []string, stdin io.Reader,
 		return runListPlans(stdout, stderr, args[1:])
 	case "get":
 		return runGet(program, stdout, stderr, args[1:])
+	case "get-task":
+		return runGetTask(program, stdout, stderr, args[1:])
 	case "show":
 		return runShow(program, stdout, stderr, args[1:])
 	case "update":
@@ -227,10 +243,12 @@ func runGet(program string, stdout, stderr io.Writer, args []string) int {
 	fs := newCommandFlagSet("get", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	jsonOut := fs.Bool("json", false, "emit json")
+	mermaidOut := fs.Bool("mermaid", false, "emit a Mermaid task graph")
 	verbose := fs.Bool("verbose", false, "show additional details")
 	if err := fs.Parse(reorderFlags(args, map[string]bool{
 		"--dir":     true,
 		"--json":    false,
+		"--mermaid": false,
 		"--verbose": false,
 	})); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -239,23 +257,131 @@ func runGet(program string, stdout, stderr io.Writer, args []string) int {
 		return 1
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintf(stderr, "usage: %s get [--dir PATH] [--json] [--verbose] <plan>\n", program)
+		fmt.Fprintf(stderr, "usage: %s get [--dir PATH] [--json | --mermaid] [--verbose] <plan>\n", program)
+		return 1
+	}
+	if *jsonOut && *mermaidOut {
+		fmt.Fprintln(stderr, "--json and --mermaid are mutually exclusive")
 		return 1
 	}
 	store, err := Open(*dir)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return writeCLIError(stdout, stderr, *jsonOut, err)
 	}
 	plan, err := resolvePlan(store, fs.Arg(0))
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return writeCLIError(stdout, stderr, *jsonOut, err)
 	}
 	if *jsonOut {
 		return writeJSON(stdout, plan, stderr)
 	}
+	if *mermaidOut {
+		fmt.Fprintln(stdout, formatPlanMermaid(*plan))
+		return 0
+	}
 	fmt.Fprintln(stdout, formatPlan(*plan, *verbose))
+	return 0
+}
+
+func runGetTask(program string, stdout, stderr io.Writer, args []string) int {
+	fs := newCommandFlagSet("get-task", program, stderr)
+	dir := fs.String("dir", "", "workspace root")
+	parent := fs.String("parent", "", "filter by exact parent task")
+	claimedBy := fs.String("claimed-by", "", "filter by claimer id")
+	fieldsText := fs.String("fields", "", "comma-separated fields to return")
+	limit := fs.Int("limit", defaultTaskQueryLimit, "maximum tasks to return")
+	cursor := fs.String("cursor", "", "opaque pagination cursor")
+	knownVersion := fs.Int("known-version", -1, "return unchanged when the plan version matches")
+	jsonOut := fs.Bool("json", false, "emit json")
+	pretty := fs.Bool("pretty", false, "pretty-print json")
+	var statuses multiStringFlag
+	fs.Var(&statuses, "status", "filter by status (repeatable or comma-separated)")
+	if err := fs.Parse(reorderFlags(args, map[string]bool{
+		"--dir":           true,
+		"--status":        true,
+		"--parent":        true,
+		"--claimed-by":    true,
+		"--fields":        true,
+		"--limit":         true,
+		"--cursor":        true,
+		"--known-version": true,
+		"--json":          false,
+		"--pretty":        false,
+	})); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return 0
+		}
+		return 1
+	}
+	if fs.NArg() < 1 {
+		fmt.Fprintf(stderr, "usage: %s get-task [options] <plan> [<task> ...]\n", program)
+		return 1
+	}
+	if *pretty && !*jsonOut {
+		fmt.Fprintln(stderr, "--pretty requires --json")
+		return 1
+	}
+	if *knownVersion < -1 {
+		return writeCLIError(
+			stdout,
+			stderr,
+			*jsonOut,
+			invalidArgumentError(errors.New("--known-version must be non-negative")),
+		)
+	}
+	statusValues, err := parseTaskQueryStatuses(statuses.values)
+	if err != nil {
+		return writeCLIError(stdout, stderr, *jsonOut, invalidArgumentError(err))
+	}
+	fields := splitCommaValues([]string{*fieldsText})
+	query := TaskQuery{
+		TaskRefs:  append([]string(nil), fs.Args()[1:]...),
+		Statuses:  statusValues,
+		ParentRef: *parent,
+		ClaimedBy: *claimedBy,
+		Fields:    fields,
+		Limit:     *limit,
+		Cursor:    *cursor,
+	}
+	if *knownVersion >= 0 {
+		query.KnownVersion = knownVersion
+	}
+	if len(query.TaskRefs) == 0 && len(query.Statuses) == 0 &&
+		strings.TrimSpace(query.ParentRef) == "" && strings.TrimSpace(query.ClaimedBy) == "" {
+		err := invalidArgumentError(
+			errors.New("get-task requires at least one task reference or filter"),
+		)
+		return writeCLIError(stdout, stderr, *jsonOut, err)
+	}
+	store, err := Open(*dir)
+	if err != nil {
+		return writeCLIError(stdout, stderr, *jsonOut, err)
+	}
+	planID, err := resolvePlanID(store, fs.Arg(0))
+	if err != nil {
+		return writeCLIError(stdout, stderr, *jsonOut, err)
+	}
+	result, err := store.GetTasks(planID, query)
+	if err != nil {
+		return writeCLIError(stdout, stderr, *jsonOut, err)
+	}
+	if *jsonOut {
+		return writeJSONWithIndent(stdout, result, stderr, *pretty)
+	}
+	if result.Unchanged {
+		fmt.Fprintf(stdout, "Plan %s is unchanged at version %d.\n", result.PlanID, result.Version)
+		return 0
+	}
+	if len(result.Tasks) == 0 {
+		fmt.Fprintln(stdout, "No matching tasks found.")
+		return 0
+	}
+	for _, task := range result.Tasks {
+		fmt.Fprintln(stdout, formatTaskView(task, result.Fields))
+	}
+	if result.NextCursor != "" {
+		fmt.Fprintf(stdout, "Next cursor: %s\n", result.NextCursor)
+	}
 	return 0
 }
 
@@ -263,10 +389,12 @@ func runShow(program string, stdout, stderr io.Writer, args []string) int {
 	fs := newCommandFlagSet("show", program, stderr)
 	dir := fs.String("dir", "", "workspace root")
 	jsonOut := fs.Bool("json", false, "emit json")
+	mermaidOut := fs.Bool("mermaid", false, "emit a Mermaid task graph")
 	verbose := fs.Bool("verbose", false, "show additional details")
 	if err := fs.Parse(reorderFlags(args, map[string]bool{
 		"--dir":     true,
 		"--json":    false,
+		"--mermaid": false,
 		"--verbose": false,
 	})); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -275,21 +403,27 @@ func runShow(program string, stdout, stderr io.Writer, args []string) int {
 		return 1
 	}
 	if fs.NArg() != 1 {
-		fmt.Fprintf(stderr, "usage: %s show [--dir PATH] [--json] [--verbose] <plan>\n", program)
+		fmt.Fprintf(stderr, "usage: %s show [--dir PATH] [--json | --mermaid] [--verbose] <plan>\n", program)
+		return 1
+	}
+	if *jsonOut && *mermaidOut {
+		fmt.Fprintln(stderr, "--json and --mermaid are mutually exclusive")
 		return 1
 	}
 	store, err := Open(*dir)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return writeCLIError(stdout, stderr, *jsonOut, err)
 	}
 	plan, err := resolvePlan(store, fs.Arg(0))
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return writeCLIError(stdout, stderr, *jsonOut, err)
 	}
 	if *jsonOut {
 		return writeJSON(stdout, plan, stderr)
+	}
+	if *mermaidOut {
+		fmt.Fprintln(stdout, formatPlanMermaid(*plan))
+		return 0
 	}
 	showVerbose := true
 	if isFlagPassed(args, "--verbose") {
@@ -734,18 +868,15 @@ func runStats(program string, stdout, stderr io.Writer, args []string) int {
 	}
 	store, err := Open(*dir)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return writeCLIError(stdout, stderr, *jsonOut, err)
 	}
-	plan, err := resolvePlan(store, fs.Arg(0))
+	planID, err := resolvePlanID(store, fs.Arg(0))
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return writeCLIError(stdout, stderr, *jsonOut, err)
 	}
-	stats, err := store.Stats(plan.ID)
+	stats, err := store.Stats(planID)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return writeCLIError(stdout, stderr, *jsonOut, err)
 	}
 	if *jsonOut {
 		return writeJSON(stdout, stats, stderr)
@@ -773,18 +904,15 @@ func runAudit(program string, stdout, stderr io.Writer, args []string) int {
 	}
 	store, err := Open(*dir)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return writeCLIError(stdout, stderr, *jsonOut, err)
 	}
-	plan, err := resolvePlan(store, fs.Arg(0))
+	planID, err := resolvePlanID(store, fs.Arg(0))
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return writeCLIError(stdout, stderr, *jsonOut, err)
 	}
-	report, err := store.Audit(plan.ID)
+	report, err := store.Audit(planID)
 	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
+		return writeCLIError(stdout, stderr, *jsonOut, err)
 	}
 	if *jsonOut {
 		return writeJSON(stdout, report, stderr)
@@ -1166,25 +1294,43 @@ var commandHelpEntries = map[string]helpEntry{
 	},
 	"get": {
 		Summary: "Load a plan and all of its tasks.",
-		Usage:   "get [--dir PATH] [--json] [--verbose] <plan>",
+		Usage:   "get [--dir PATH] [--json | --mermaid] [--verbose] <plan>",
 		Details: []string{
 			"Accepts a plan ID or exact plan name.",
+			"Returns every task and can be large; prefer stats, ready, or get-task for routine work.",
 			"Use show when you want the explicit whole-plan snapshot command name.",
+			"Use --mermaid to emit a flowchart of hierarchy and dependency edges.",
 		},
 		Examples: []string{
 			"get c1ebfc53 --json",
 			`get "API Plan" --verbose`,
 		},
 	},
+	"get-task": {
+		Summary: "Retrieve selected tasks with bounded fields and pagination.",
+		Usage:   "get-task [--dir PATH] [--status STATUS] [--parent TASK] [--claimed-by ID] [--fields FIELD,...] [--limit N] [--cursor CURSOR] [--known-version N] [--json] [--pretty] <plan> [<task> ...]",
+		Details: []string{
+			"Task references resolve by ID first and exact name second.",
+			"At least one task reference or filter is required.",
+			"Defaults to 25 tasks and bounded previews; full descriptions, outputs, paths, and timestamps require explicit fields.",
+		},
+		Examples: []string{
+			"get-task c1ebfc53 001-design-store --json",
+			"get-task c1ebfc53 --status in_progress --fields id,name,status,description_preview --json",
+		},
+	},
 	"show": {
 		Summary: "Show the current plan state and all tasks.",
-		Usage:   "show [--dir PATH] [--json] [--verbose] <plan>",
+		Usage:   "show [--dir PATH] [--json | --mermaid] [--verbose] <plan>",
 		Details: []string{
 			"Returns the same plan payload as get, but with a more explicit name for agent loops.",
 			"Accepts a plan ID or exact plan name.",
+			"Returns every task and can be large; prefer stats, ready, or get-task for routine work.",
+			"Use --mermaid to emit a flowchart of hierarchy and dependency edges.",
 		},
 		Examples: []string{
 			"show c1ebfc53 --json",
+			"show c1ebfc53 --mermaid",
 		},
 	},
 	"update": {
@@ -1320,6 +1466,7 @@ var commandHelpOrder = []string{
 	"create",
 	"list",
 	"get",
+	"get-task",
 	"show",
 	"update",
 	"delete",
@@ -1386,13 +1533,93 @@ func newCommandFlagSet(name, program string, stderr io.Writer) *flag.FlagSet {
 }
 
 func writeJSON(w io.Writer, value any, stderr io.Writer) int {
+	return writeJSONWithIndent(w, value, stderr, jsonWriterPretty(w))
+}
+
+func writeJSONWithIndent(w io.Writer, value any, stderr io.Writer, pretty bool) int {
 	encoder := json.NewEncoder(w)
-	encoder.SetIndent("", "  ")
+	if pretty || jsonWriterPretty(w) {
+		encoder.SetIndent("", "  ")
+	}
 	if err := encoder.Encode(value); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
 	return 0
+}
+
+func parseTaskQueryStatuses(values []string) ([]Status, error) {
+	parts := splitCommaValues(values)
+	statuses := make([]Status, 0, len(parts))
+	for _, part := range parts {
+		status := Status(part)
+		if !isValidStatus(status) {
+			return nil, fmt.Errorf("invalid status: %s", part)
+		}
+		statuses = append(statuses, status)
+	}
+	return statuses, nil
+}
+
+func splitCommaValues(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		for _, part := range strings.Split(value, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				result = append(result, part)
+			}
+		}
+	}
+	return result
+}
+
+func writeCLIError(stdout, stderr io.Writer, jsonOut bool, err error) int {
+	if !jsonOut {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	writeJSON(stdout, ErrorEnvelope{OK: false, Error: errorObject(err)}, stderr)
+	return 1
+}
+
+type cliJSONWriter struct {
+	io.Writer
+	pretty bool
+}
+
+func (w cliJSONWriter) JSONPretty() bool {
+	return w.pretty
+}
+
+func jsonWriterPretty(w io.Writer) bool {
+	type prettyWriter interface {
+		JSONPretty() bool
+	}
+	if typed, ok := w.(prettyWriter); ok {
+		return typed.JSONPretty()
+	}
+	return false
+}
+
+func extractPrettyFlag(args []string) ([]string, bool, error) {
+	cleaned := make([]string, 0, len(args))
+	pretty := false
+	for _, arg := range args {
+		if arg == "--pretty" {
+			pretty = true
+			continue
+		}
+		if strings.HasPrefix(arg, "--pretty=") {
+			value, err := strconv.ParseBool(strings.TrimPrefix(arg, "--pretty="))
+			if err != nil {
+				return nil, false, fmt.Errorf("invalid value for --pretty: %w", err)
+			}
+			pretty = value
+			continue
+		}
+		cleaned = append(cleaned, arg)
+	}
+	return cleaned, pretty, nil
 }
 
 func resolveStoreAndPlan(dir, planRef string) (*Store, *Plan, error) {
@@ -1534,6 +1761,42 @@ func formatTaskSummary(task TaskSummary) string {
 	return line
 }
 
+func formatTaskView(task map[string]any, fields []string) string {
+	id, _ := task["id"].(string)
+	name, _ := task["name"].(string)
+	status := fmt.Sprint(task["status"])
+	if id == "" {
+		id = "(task)"
+	}
+	if name == "" {
+		name = "(unnamed)"
+	}
+	line := fmt.Sprintf("- %s [%s] %s", id, status, name)
+	for _, field := range fields {
+		if field == "id" || field == "name" || field == "status" {
+			continue
+		}
+		value, ok := task[field]
+		if !ok {
+			continue
+		}
+		switch typed := value.(type) {
+		case nil:
+			line += fmt.Sprintf("\n    %s: -", field)
+		case string:
+			line += fmt.Sprintf("\n    %s: %s", field, typed)
+		default:
+			encoded, err := json.Marshal(typed)
+			if err != nil {
+				line += fmt.Sprintf("\n    %s: %v", field, typed)
+			} else {
+				line += fmt.Sprintf("\n    %s: %s", field, encoded)
+			}
+		}
+	}
+	return line
+}
+
 func formatTask(task TaskRecord, indent int) string {
 	prefix := strings.Repeat("  ", indent)
 	symbol := "[ ]"
@@ -1591,6 +1854,51 @@ func formatPlan(plan Plan, verbose bool) string {
 	return strings.Join(lines, "\n")
 }
 
+func formatPlanMermaid(plan Plan) string {
+	lines := []string{
+		fmt.Sprintf("%%%% Plan: %s (%s)", mermaidText(plan.Name), mermaidText(plan.ID)),
+		"flowchart TD",
+	}
+	nodeIDs := make(map[string]string, len(plan.Tasks))
+	for i, task := range plan.Tasks {
+		nodeIDs[task.ID] = fmt.Sprintf("task%d", i)
+	}
+	for _, task := range plan.Tasks {
+		label := mermaidText(task.ID) + "<br/>" + mermaidText(task.Name) + "<br/>" + mermaidText(string(task.Status))
+		lines = append(lines, fmt.Sprintf("  %s[\"%s\"]:::%s", nodeIDs[task.ID], label, task.Status))
+	}
+	for _, task := range plan.Tasks {
+		if parentNode, ok := nodeIDs[task.ParentID]; ok {
+			lines = append(lines, fmt.Sprintf("  %s -. parent .-> %s", parentNode, nodeIDs[task.ID]))
+		}
+		for _, dependencyID := range task.DependsOn {
+			if dependencyNode, ok := nodeIDs[dependencyID]; ok {
+				lines = append(lines, fmt.Sprintf("  %s -->|blocks| %s", dependencyNode, nodeIDs[task.ID]))
+			}
+		}
+	}
+	lines = append(lines,
+		"  classDef not_started fill:#f5f5f5,stroke:#616161,color:#212121",
+		"  classDef in_progress fill:#e3f2fd,stroke:#1565c0,color:#0d47a1",
+		"  classDef blocked fill:#ffebee,stroke:#c62828,color:#b71c1c",
+		"  classDef complete fill:#e8f5e9,stroke:#2e7d32,color:#1b5e20",
+		"  classDef cancelled fill:#eeeeee,stroke:#757575,color:#616161",
+	)
+	return strings.Join(lines, "\n")
+}
+
+func mermaidText(value string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		"\"", "&quot;",
+		"<", "&lt;",
+		">", "&gt;",
+		"\n", " ",
+		"\r", " ",
+	)
+	return replacer.Replace(value)
+}
+
 const timeFormat = time.RFC3339Nano
 
 func commandName(name string) string {
@@ -1618,6 +1926,8 @@ func resolvePlan(store *Store, planRef string) (*Plan, error) {
 	}
 	if plan, err := store.GetPlan(cleaned); err == nil {
 		return plan, nil
+	} else if !errorHasCode(err, ErrorCodePlanNotFound) {
+		return nil, err
 	}
 	summaries, err := store.ListPlans()
 	if err != nil {
@@ -1639,7 +1949,53 @@ func resolvePlan(store *Store, planRef string) (*Plan, error) {
 		}
 		return nil, fmt.Errorf("multiple plans matched %q: %s", cleaned, strings.Join(ids, ", "))
 	}
-	return nil, fmt.Errorf("plan not found: %s (expected plan ID or exact plan name)", cleaned)
+	return nil, &PlanError{
+		ErrorCode: ErrorCodePlanNotFound,
+		Message:   "expected plan ID or exact plan name",
+		PlanID:    cleaned,
+	}
+}
+
+func resolvePlanID(store *Store, planRef string) (string, error) {
+	cleaned := strings.TrimSpace(planRef)
+	if cleaned == "" {
+		return "", fmt.Errorf("plan identifier is required")
+	}
+	record, err := store.loadPlanRecord(cleaned)
+	if err == nil {
+		return record.ID, nil
+	}
+	if !errorHasCode(err, ErrorCodePlanNotFound) {
+		return "", err
+	}
+	entries, err := readDirFunc(store.plansDir())
+	if err != nil {
+		return "", err
+	}
+	matches := make([]string, 0, 1)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		candidate, err := store.loadPlanRecord(entry.Name())
+		if err != nil {
+			return "", err
+		}
+		if candidate.Name == cleaned {
+			matches = append(matches, candidate.ID)
+		}
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("multiple plans matched %q: %s", cleaned, strings.Join(matches, ", "))
+	}
+	return "", &PlanError{
+		ErrorCode: ErrorCodePlanNotFound,
+		Message:   "expected plan ID or exact plan name",
+		PlanID:    cleaned,
+	}
 }
 
 func resolveTask(plan *Plan, taskRef, label string) (*TaskRecord, error) {
@@ -1666,7 +2022,11 @@ func resolveTask(plan *Plan, taskRef, label string) (*TaskRecord, error) {
 		}
 		return nil, fmt.Errorf("multiple tasks matched %q: %s", cleaned, strings.Join(ids, ", "))
 	}
-	return nil, fmt.Errorf("%s not found: %s (expected task ID or exact task name)", label, cleaned)
+	return nil, &PlanError{
+		ErrorCode: ErrorCodeTaskNotFound,
+		Message:   label + " not found",
+		TaskID:    cleaned,
+	}
 }
 
 func resolveDependencyIDs(plan *Plan, refs []string) ([]string, error) {

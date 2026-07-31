@@ -41,9 +41,10 @@ type TextContent struct {
 }
 
 type ToolResult struct {
-	Content           []TextContent `json:"content"`
-	StructuredContent any           `json:"structuredContent,omitempty"`
-	IsError           bool          `json:"isError,omitempty"`
+	Content           []TextContent  `json:"content"`
+	StructuredContent any            `json:"structuredContent,omitempty"`
+	IsError           bool           `json:"isError,omitempty"`
+	MetricHints       map[string]int `json:"-"`
 }
 
 type ToolCallParams struct {

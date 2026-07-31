@@ -1,12 +1,14 @@
 package agentplan
 
 import (
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -17,18 +19,19 @@ import (
 )
 
 const (
-	metaDirName        = ".agent-plan"
-	plansDirName       = "plans"
-	workspaceFileName  = "workspace.json"
-	workspaceLockName  = "workspace.lock"
-	planFileName       = "plan.json"
-	tasksDirName       = "tasks"
-	historyDirName     = "history"
-	manifestFileName   = "manifest.json"
-	manifestLockName   = "manifest.lock"
-	defaultFilePerm    = 0o644
-	defaultDirPerm     = 0o755
-	currentStoreFormat = 2
+	metaDirName            = ".agent-plan"
+	plansDirName           = "plans"
+	workspaceFileName      = "workspace.json"
+	workspaceLockName      = "workspace.lock"
+	planFileName           = "plan.json"
+	tasksDirName           = "tasks"
+	historyDirName         = "history"
+	manifestFileName       = "manifest.json"
+	manifestLockName       = "manifest.lock"
+	defaultFilePerm        = 0o644
+	defaultDirPerm         = 0o755
+	currentStoreFormat     = 2
+	currentManifestVersion = 2
 )
 
 var (
@@ -46,6 +49,8 @@ var (
 	readDirFunc           = os.ReadDir
 	getwdFunc             = os.Getwd
 	absFunc               = filepath.Abs
+	lstatFunc             = os.Lstat
+	evalSymlinksFunc      = filepath.EvalSymlinks
 	openExclusiveFileFunc = func(path string, perm os.FileMode) (exclusiveFile, error) {
 		return os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	}
@@ -72,18 +77,29 @@ type tempFile interface {
 }
 
 type Store struct {
-	Root    string
-	MetaDir string
+	Root     string
+	MetaDir  string
+	warnings []string
 }
 
 func Init(root string) (*Store, error) {
-	resolvedRoot, err := normalizeRoot(root)
+	selectedRoot, err := selectRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := mkdirAllFunc(selectedRoot, defaultDirPerm); err != nil {
+		return nil, err
+	}
+	resolvedRoot, err := canonicalizePath(selectedRoot)
 	if err != nil {
 		return nil, err
 	}
 	store := &Store{
 		Root:    resolvedRoot,
 		MetaDir: filepath.Join(resolvedRoot, metaDirName),
+	}
+	if err := validateMetaDirWithinRoot(store.Root, store.MetaDir); err != nil {
+		return nil, err
 	}
 	if err := mkdirAllFunc(store.MetaDir, defaultDirPerm); err != nil {
 		return nil, err
@@ -150,7 +166,7 @@ func (s *Store) CreatePlan(name, description, specPath string) (*Plan, error) {
 			Version:     1,
 		}
 		manifest := &Manifest{
-			Version:      1,
+			Version:      currentManifestVersion,
 			PlanID:       plan.ID,
 			CreatedAt:    now,
 			UpdatedAt:    now,
@@ -272,18 +288,19 @@ func (s *Store) AddTask(planID, name string, opts AddOptions) (*TaskRecord, erro
 		if err != nil {
 			return err
 		}
-		deps, err := plan.ValidateDependencyIDs(opts.DependsOn, record.ID)
+		createdID := record.ID
+		deps, err := plan.ValidateDependencyIDs(opts.DependsOn, createdID)
 		if err != nil {
 			return err
 		}
-		task := plan.GetTask(record.ID)
+		task := plan.GetTask(createdID)
 		task.DependsOn = deps
 		task.UpdatedAt = time.Now().UTC()
 		manifest.NextSequence++
 		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
 			return err
 		}
-		task = plan.GetTask(record.ID)
+		task = plan.GetTask(createdID)
 		if task == nil {
 			return ErrTaskNotFound
 		}
@@ -394,11 +411,30 @@ func (s *Store) ClaimNext(planID, by string) (*TaskRecord, error) {
 			by = defaultActor()
 		}
 		if current.ClaimedBy == by {
+			if current.Status != StatusInProgress {
+				now := time.Now().UTC()
+				current.Assignee = by
+				current.Status = StatusInProgress
+				current.UpdatedAt = now
+				if current.ClaimedAt == nil {
+					current.ClaimedAt = &now
+				}
+				claimedID := current.ID
+				plan.touch()
+				if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
+					return err
+				}
+				current = plan.GetTask(claimedID)
+				if current == nil {
+					return ErrTaskNotFound
+				}
+			}
 			copy := *current
 			claimed = &copy
 			return nil
 		}
-		claimPath := s.claimPath(planID, current.ID)
+		claimedID := current.ID
+		claimPath := s.claimPath(planID, claimedID)
 		claim, err := createClaim(claimPath, by)
 		if err != nil {
 			return err
@@ -409,8 +445,14 @@ func (s *Store) ClaimNext(planID, by string) (*TaskRecord, error) {
 		current.ClaimedAt = &now
 		current.Status = StatusInProgress
 		current.UpdatedAt = now
+		plan.touch()
 		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
+			_ = removeFileFunc(claimPath)
 			return err
+		}
+		current = plan.GetTask(claimedID)
+		if current == nil {
+			return ErrTaskNotFound
 		}
 		copy := *current
 		claimed = &copy
@@ -492,7 +534,9 @@ func (s *Store) claimTask(planID, taskID, by string) (*TaskRecord, error) {
 		if task.ClaimedBy != "" {
 			return ErrTaskAlreadyClaimed
 		}
-		claim, err := createClaim(s.claimPath(planID, task.ID), by)
+		claimedID := task.ID
+		claimPath := s.claimPath(planID, claimedID)
+		claim, err := createClaim(claimPath, by)
 		if err != nil {
 			return err
 		}
@@ -502,8 +546,14 @@ func (s *Store) claimTask(planID, taskID, by string) (*TaskRecord, error) {
 		task.ClaimedAt = &now
 		task.Status = StatusInProgress
 		task.UpdatedAt = now
+		plan.touch()
 		if err := s.persistPlanLocked(plan, manifest, nil); err != nil {
+			_ = removeFileFunc(claimPath)
 			return err
+		}
+		task = plan.GetTask(claimedID)
+		if task == nil {
+			return ErrTaskNotFound
 		}
 		copy := *task
 		claimed = &copy
@@ -518,15 +568,12 @@ func (s *Store) claimTask(planID, taskID, by string) (*TaskRecord, error) {
 func (s *Store) persistPlanLocked(plan *Plan, manifest *Manifest, _ map[string]TaskSummary) error {
 	if manifest == nil {
 		manifest = &Manifest{
-			Version:      1,
+			Version:      currentManifestVersion,
 			PlanID:       plan.ID,
 			CreatedAt:    plan.CreatedAt,
 			UpdatedAt:    plan.UpdatedAt,
 			NextSequence: 1,
 		}
-	}
-	if manifest.Version == 0 {
-		manifest.Version = 1
 	}
 	if manifest.PlanID == "" {
 		manifest.PlanID = plan.ID
@@ -535,7 +582,7 @@ func (s *Store) persistPlanLocked(plan *Plan, manifest *Manifest, _ map[string]T
 		manifest.CreatedAt = plan.CreatedAt
 	}
 
-	previousFiles := map[string]TaskSummary{}
+	previousFiles := make(map[string]TaskSummary, len(manifest.Tasks))
 	for _, task := range manifest.Tasks {
 		previousFiles[task.ID] = task
 	}
@@ -549,38 +596,60 @@ func (s *Store) persistPlanLocked(plan *Plan, manifest *Manifest, _ map[string]T
 		UpdatedAt:   plan.UpdatedAt.UTC(),
 		Version:     plan.Version,
 	}
-	if err := mkdirAllFunc(s.planDir(plan.ID), defaultDirPerm); err != nil {
-		return err
+	for _, dir := range []string{s.planDir(plan.ID), s.planTasksDir(plan.ID), s.planHistoryDir(plan.ID)} {
+		if err := mkdirAllFunc(dir, defaultDirPerm); err != nil {
+			return err
+		}
 	}
-	if err := mkdirAllFunc(s.planTasksDir(plan.ID), defaultDirPerm); err != nil {
-		return err
-	}
-	if err := mkdirAllFunc(s.planHistoryDir(plan.ID), defaultDirPerm); err != nil {
-		return err
-	}
-	current := map[string]TaskSummary{}
-	manifest.Tasks = manifest.Tasks[:0]
+
 	sortTasks(plan.Tasks)
+	nextManifest := &Manifest{
+		Version:      currentManifestVersion,
+		PlanID:       manifest.PlanID,
+		CreatedAt:    manifest.CreatedAt.UTC(),
+		UpdatedAt:    plan.UpdatedAt.UTC(),
+		NextSequence: manifest.NextSequence,
+		Tasks:        make([]TaskSummary, 0, len(plan.Tasks)),
+	}
+	if nextManifest.NextSequence == 0 {
+		nextManifest.NextSequence = maxSequence(plan.Tasks) + 1
+	}
+	currentFiles := make(map[string]TaskSummary, len(plan.Tasks))
+
+	// Durable records and active claims must exist before the new manifest can
+	// reference them. Superseded files remain in place until after the commit.
 	for i := range plan.Tasks {
 		task := &plan.Tasks[i]
 		if task.Name == "" {
 			task.Name = fmt.Sprintf("Task %s", task.ID)
 		}
-		task.Path = s.taskFilePath(plan.ID, task.ID, task.Status)
+		task.Path = taskRecordRelativePath(task.ID, task.Status)
 		if task.Status == StatusComplete {
 			task.ClaimPath = ""
 		} else {
-			task.ClaimPath = s.claimPath(plan.ID, task.ID)
+			task.ClaimPath = taskClaimRelativePath(task.ID)
 		}
-		if err := s.writeTaskRecord(task.Path, *task); err != nil {
-			return err
+		summary := summaryFromRecord(*task)
+		previous, existed := previousFiles[task.ID]
+		if !existed || !taskSummariesEqual(previous, summary) {
+			recordPath, err := s.resolveManifestRecordPath(plan.ID, task.Path, false)
+			if err != nil {
+				return err
+			}
+			if err := s.writeTaskRecord(recordPath, *task); err != nil {
+				return err
+			}
 		}
-		if task.ClaimedBy != "" && task.Status != StatusComplete && task.Status != StatusCancelled && task.Status != StatusBlocked {
+		if taskHasActiveClaim(*task) && (!existed || claimSummaryChanged(previous, summary)) {
+			claimPath, err := s.resolveManifestRecordPath(plan.ID, task.ClaimPath, true)
+			if err != nil {
+				return err
+			}
 			claimedAt := time.Now().UTC()
 			if task.ClaimedAt != nil {
 				claimedAt = task.ClaimedAt.UTC()
 			}
-			if err := atomicWriteJSON(task.ClaimPath, ClaimInfo{
+			if err := atomicWriteJSON(claimPath, ClaimInfo{
 				By:        task.ClaimedBy,
 				ClaimedAt: claimedAt,
 				Host:      os.Getenv("HOSTNAME"),
@@ -588,58 +657,38 @@ func (s *Store) persistPlanLocked(plan *Plan, manifest *Manifest, _ map[string]T
 			}); err != nil {
 				return err
 			}
-		} else if task.ClaimPath != "" {
-			if err := removeFileFunc(task.ClaimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-		} else {
-			if err := removeFileFunc(s.claimPath(plan.ID, task.ID)); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
 		}
-		if previous, ok := previousFiles[task.ID]; ok {
-			if previous.Path != "" && previous.Path != task.Path {
-				if err := removeFileFunc(previous.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
-			}
-			if previous.ClaimPath != "" && previous.ClaimPath != task.ClaimPath {
-				if err := removeFileFunc(previous.ClaimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-					return err
-				}
-			}
-		}
-		summary := summaryFromRecord(*task)
-		current[task.ID] = summary
-		manifest.Tasks = append(manifest.Tasks, summary)
+		currentFiles[task.ID] = summary
+		nextManifest.Tasks = append(nextManifest.Tasks, summary)
 	}
-	for id, previous := range previousFiles {
-		if _, ok := current[id]; ok {
-			continue
-		}
-		if previous.Path != "" {
-			if err := removeFileFunc(previous.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-		}
-		if previous.ClaimPath != "" {
-			if err := removeFileFunc(previous.ClaimPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return err
-			}
-		}
-	}
-	sortSummaries(manifest.Tasks)
-	manifest.UpdatedAt = plan.UpdatedAt.UTC()
-	if manifest.NextSequence == 0 {
-		manifest.NextSequence = maxSequence(plan.Tasks) + 1
-	}
+	sortSummaries(nextManifest.Tasks)
 
+	// Committing metadata happens only after every referenced record exists.
+	// A failure leaves the previous manifest and all of its paths readable.
 	if err := atomicWriteJSON(s.planInfoPath(plan.ID), record); err != nil {
 		return err
 	}
-	if err := atomicWriteJSON(s.planManifestPath(plan.ID), manifest); err != nil {
+	if err := atomicWriteJSON(s.planManifestPath(plan.ID), nextManifest); err != nil {
 		return err
 	}
+
+	// Cleanup is deliberately best effort. A leftover file is an auditable
+	// orphan; removing an active destination would be data loss.
+	for id, previous := range previousFiles {
+		current, retained := currentFiles[id]
+		if previous.Path != "" && (!retained || previous.Path != current.Path) {
+			s.cleanupSupersededRecord(plan.ID, previous.Path, current.Path)
+		}
+		if previous.ClaimPath != "" && (!retained || previous.ClaimPath != current.ClaimPath || !taskSummaryHasActiveClaim(current)) {
+			activeClaimPath := current.ClaimPath
+			if !retained || !taskSummaryHasActiveClaim(current) {
+				activeClaimPath = ""
+			}
+			s.cleanupSupersededRecord(plan.ID, previous.ClaimPath, activeClaimPath)
+		}
+	}
+
+	*manifest = *nextManifest
 	return nil
 }
 
@@ -656,19 +705,41 @@ func (s *Store) loadPlan(planID string) (*Plan, *Manifest, error) {
 	for _, summary := range manifest.Tasks {
 		path := summary.Path
 		if path == "" {
-			path = s.taskFilePath(planID, summary.ID, summary.Status)
+			path = taskRecordRelativePath(summary.ID, summary.Status)
 		}
-		recordTask, err := s.readTaskRecord(path)
+		recordPath, err := s.resolveManifestRecordPath(planID, path, false)
 		if err != nil {
 			return nil, nil, err
 		}
+		recordTask, err := s.readTaskRecord(recordPath)
+		if err != nil {
+			code := ErrorCodePlanUnreadable
+			message := "task record is unreadable"
+			if errors.Is(err, os.ErrNotExist) {
+				code = ErrorCodeTaskRecordMissing
+				message = "task record missing"
+			}
+			return nil, nil, &PlanError{
+				ErrorCode: code,
+				Message:   message,
+				PlanID:    planID,
+				TaskID:    summary.ID,
+				Path:      summary.Path,
+				Err:       err,
+			}
+		}
+		recordTask.Path = path
 		if summary.ClaimPath != "" {
 			recordTask.ClaimPath = summary.ClaimPath
 		} else if recordTask.Status != StatusComplete {
-			recordTask.ClaimPath = s.claimPath(planID, recordTask.ID)
+			recordTask.ClaimPath = taskClaimRelativePath(recordTask.ID)
 		}
 		if recordTask.Status != StatusComplete {
-			if data, err := readFileFunc(s.claimPath(planID, recordTask.ID)); err == nil {
+			claimPath, err := s.resolveManifestRecordPath(planID, recordTask.ClaimPath, true)
+			if err != nil {
+				return nil, nil, err
+			}
+			if data, err := readFileFunc(claimPath); err == nil {
 				var claim ClaimInfo
 				if err := json.Unmarshal(data, &claim); err == nil {
 					recordTask.ClaimedBy = claim.By
@@ -677,7 +748,14 @@ func (s *Store) loadPlan(planID string) (*Plan, *Manifest, error) {
 					recordTask.ClaimedAt = &claimedAt
 				}
 			} else if !errors.Is(err, os.ErrNotExist) {
-				return nil, nil, err
+				return nil, nil, &PlanError{
+					ErrorCode: ErrorCodePlanUnreadable,
+					Message:   "task claim is unreadable",
+					PlanID:    planID,
+					TaskID:    summary.ID,
+					Path:      recordTask.ClaimPath,
+					Err:       err,
+				}
 			}
 		}
 		records = append(records, recordTask)
@@ -699,13 +777,28 @@ func (s *Store) loadPlanRecord(planID string) (PlanRecord, error) {
 	data, err := readFileFunc(s.planInfoPath(planID))
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return PlanRecord{}, ErrPlanNotInitialized
+			return PlanRecord{}, &PlanError{
+				ErrorCode: ErrorCodePlanNotFound,
+				Message:   "plan not found",
+				PlanID:    planID,
+				Err:       err,
+			}
 		}
-		return PlanRecord{}, err
+		return PlanRecord{}, &PlanError{
+			ErrorCode: ErrorCodePlanUnreadable,
+			Message:   "plan record is unreadable",
+			PlanID:    planID,
+			Err:       err,
+		}
 	}
 	var record PlanRecord
 	if err := json.Unmarshal(data, &record); err != nil {
-		return PlanRecord{}, err
+		return PlanRecord{}, &PlanError{
+			ErrorCode: ErrorCodePlanUnreadable,
+			Message:   "plan record is invalid",
+			PlanID:    planID,
+			Err:       err,
+		}
 	}
 	return record, nil
 }
@@ -713,17 +806,98 @@ func (s *Store) loadPlanRecord(planID string) (PlanRecord, error) {
 func (s *Store) loadManifest(planID string) (Manifest, error) {
 	data, err := readFileFunc(s.planManifestPath(planID))
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return Manifest{}, ErrPlanNotInitialized
+		return Manifest{}, &PlanError{
+			ErrorCode: ErrorCodeManifestInvalid,
+			Message:   "manifest is unreadable",
+			PlanID:    planID,
+			Path:      manifestFileName,
+			Err:       err,
 		}
-		return Manifest{}, err
 	}
 	var manifest Manifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return Manifest{}, err
+		return Manifest{}, &PlanError{
+			ErrorCode: ErrorCodeManifestInvalid,
+			Message:   "manifest is invalid",
+			PlanID:    planID,
+			Path:      manifestFileName,
+			Err:       err,
+		}
 	}
 	if manifest.Version == 0 {
 		manifest.Version = 1
+	}
+	if manifest.Version != 1 && manifest.Version != currentManifestVersion {
+		return Manifest{}, &PlanError{
+			ErrorCode: ErrorCodeManifestInvalid,
+			Message:   fmt.Sprintf("unsupported manifest version %d", manifest.Version),
+			PlanID:    planID,
+			Path:      manifestFileName,
+		}
+	}
+	if manifest.Version == 1 {
+		s.addWarning("version 1 manifest loaded; the next successful mutation will upgrade it to version 2")
+	}
+	if manifest.PlanID != "" && manifest.PlanID != planID {
+		return Manifest{}, &PlanError{
+			ErrorCode: ErrorCodeManifestInvalid,
+			Message:   "manifest plan_id does not match plan",
+			PlanID:    planID,
+			Path:      manifestFileName,
+		}
+	}
+	for i := range manifest.Tasks {
+		summary := &manifest.Tasks[i]
+		if summary.ID == "" {
+			return Manifest{}, &PlanError{
+				ErrorCode: ErrorCodeManifestInvalid,
+				Message:   fmt.Sprintf("manifest task %d has no id", i),
+				PlanID:    planID,
+				Path:      manifestFileName,
+			}
+		}
+		if summary.Path == "" {
+			summary.Path = taskRecordRelativePath(summary.ID, summary.Status)
+		} else if manifest.Version == 1 {
+			relative, err := s.legacyManifestRelativePath(planID, summary.Path, false)
+			if err != nil {
+				return Manifest{}, err
+			}
+			summary.Path = relative
+		} else if _, err := s.resolveManifestRecordPath(planID, summary.Path, false); err != nil {
+			return Manifest{}, err
+		}
+		if summary.Path != taskRecordRelativePath(summary.ID, summary.Status) {
+			return Manifest{}, &PlanError{
+				ErrorCode: ErrorCodeManifestInvalid,
+				Message:   "manifest task path does not match its id and status",
+				PlanID:    planID,
+				TaskID:    summary.ID,
+				Path:      summary.Path,
+			}
+		}
+		if summary.Status == StatusComplete {
+			summary.ClaimPath = ""
+		} else if summary.ClaimPath == "" {
+			summary.ClaimPath = taskClaimRelativePath(summary.ID)
+		} else if manifest.Version == 1 {
+			relative, err := s.legacyManifestRelativePath(planID, summary.ClaimPath, true)
+			if err != nil {
+				return Manifest{}, err
+			}
+			summary.ClaimPath = relative
+		} else if _, err := s.resolveManifestRecordPath(planID, summary.ClaimPath, true); err != nil {
+			return Manifest{}, err
+		}
+		if summary.ClaimPath != "" && summary.ClaimPath != taskClaimRelativePath(summary.ID) {
+			return Manifest{}, &PlanError{
+				ErrorCode: ErrorCodeManifestInvalid,
+				Message:   "manifest claim path does not match its task id",
+				PlanID:    planID,
+				TaskID:    summary.ID,
+				Path:      summary.ClaimPath,
+			}
+		}
 	}
 	if manifest.NextSequence == 0 {
 		manifest.NextSequence = 1
@@ -786,11 +960,6 @@ func (s *Store) readTaskRecord(path string) (TaskRecord, error) {
 	record, err := parseTaskRecord(data)
 	if err != nil {
 		return TaskRecord{}, err
-	}
-	record.Path = path
-	record.ClaimPath = filepath.Join(filepath.Dir(path), record.ID+".claim")
-	if record.Status == StatusComplete {
-		record.ClaimPath = ""
 	}
 	return record, nil
 }
@@ -922,7 +1091,7 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	return renameFunc(tmpPath, path)
 }
 
-func normalizeRoot(root string) (string, error) {
+func selectRoot(root string) (string, error) {
 	if strings.TrimSpace(root) == "" {
 		if envRoot := strings.TrimSpace(os.Getenv("AGENT_PLAN_DIR")); envRoot != "" {
 			root = envRoot
@@ -942,7 +1111,66 @@ func normalizeRoot(root string) (string, error) {
 	if filepath.Base(resolved) == metaDirName {
 		return filepath.Dir(resolved), nil
 	}
-	return resolved, nil
+	return filepath.Clean(resolved), nil
+}
+
+func normalizeRoot(root string) (string, error) {
+	selected, err := selectRoot(root)
+	if err != nil {
+		return "", err
+	}
+	return canonicalizePath(selected)
+}
+
+func canonicalizePath(path string) (string, error) {
+	path = filepath.Clean(path)
+	current := path
+	missing := make([]string, 0)
+	for {
+		if _, err := lstatFunc(current); err == nil {
+			resolved, err := evalSymlinksFunc(current)
+			if err != nil {
+				return "", err
+			}
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return filepath.Clean(resolved), nil
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", fmt.Errorf("cannot resolve workspace root %q", path)
+		}
+		missing = append(missing, filepath.Base(current))
+		current = parent
+	}
+}
+
+func validateMetaDirWithinRoot(root, metaDir string) error {
+	if _, err := lstatFunc(metaDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	resolvedMeta, err := evalSymlinksFunc(metaDir)
+	if err != nil {
+		return err
+	}
+	if !pathWithin(root, resolvedMeta) {
+		return fmt.Errorf("%s resolves outside workspace %s", metaDir, root)
+	}
+	return nil
+}
+
+func pathWithin(root, candidate string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(candidate))
+	if err != nil || filepath.IsAbs(rel) {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func findWorkspaceRoot(root string) (string, error) {
@@ -954,6 +1182,9 @@ func findWorkspaceRoot(root string) (string, error) {
 	for {
 		metaDir := filepath.Join(current, metaDirName)
 		if _, err := statFunc(metaDir); err == nil {
+			if err := validateMetaDirWithinRoot(current, metaDir); err != nil {
+				return "", err
+			}
 			return current, nil
 		}
 		parent := filepath.Dir(current)
@@ -1002,7 +1233,6 @@ func summaryFromRecord(record TaskRecord) TaskSummary {
 		DependsOn:          normalizeIDs(record.DependsOn),
 		Assignee:           record.Assignee,
 		BlockedReason:      record.BlockedReason,
-		Output:             record.Output,
 		CreatedAt:          record.CreatedAt.UTC(),
 		UpdatedAt:          record.UpdatedAt.UTC(),
 		ClaimedBy:          record.ClaimedBy,
@@ -1012,7 +1242,16 @@ func summaryFromRecord(record TaskRecord) TaskSummary {
 		Path:               record.Path,
 		ClaimPath:          record.ClaimPath,
 		DescriptionPreview: preview(record.Description),
+		RecordHash:         taskRecordHash(record),
 	}
+}
+
+func taskRecordHash(record TaskRecord) string {
+	data, err := json.Marshal(record)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
 func parseTaskRecord(data []byte) (TaskRecord, error) {
@@ -1184,4 +1423,176 @@ func (s *Store) taskFilePath(planID, id string, status Status) string {
 		return s.historyPath(planID, id)
 	}
 	return s.taskPath(planID, id)
+}
+
+func (s *Store) addWarning(message string) {
+	for _, warning := range s.warnings {
+		if warning == message {
+			return
+		}
+	}
+	s.warnings = append(s.warnings, message)
+}
+
+func (s *Store) Warnings() []string {
+	return append([]string(nil), s.warnings...)
+}
+
+func taskRecordRelativePath(id string, status Status) string {
+	if status == StatusComplete {
+		return filepath.ToSlash(filepath.Join(historyDirName, id+".done"))
+	}
+	return filepath.ToSlash(filepath.Join(tasksDirName, id+".md"))
+}
+
+func taskClaimRelativePath(id string) string {
+	return filepath.ToSlash(filepath.Join(tasksDirName, id+".claim"))
+}
+
+func taskHasActiveClaim(task TaskRecord) bool {
+	return task.ClaimedBy != "" &&
+		task.Status != StatusComplete &&
+		task.Status != StatusCancelled &&
+		task.Status != StatusBlocked
+}
+
+func taskSummaryHasActiveClaim(task TaskSummary) bool {
+	return task.ClaimedBy != "" &&
+		task.Status != StatusComplete &&
+		task.Status != StatusCancelled &&
+		task.Status != StatusBlocked
+}
+
+func claimSummaryChanged(previous, current TaskSummary) bool {
+	return previous.ClaimPath != current.ClaimPath ||
+		previous.ClaimedBy != current.ClaimedBy ||
+		!reflect.DeepEqual(previous.ClaimedAt, current.ClaimedAt)
+}
+
+func taskSummariesEqual(first, second TaskSummary) bool {
+	first.DependsOn = normalizeIDs(first.DependsOn)
+	second.DependsOn = normalizeIDs(second.DependsOn)
+	return reflect.DeepEqual(first, second)
+}
+
+func (s *Store) resolveManifestRecordPath(planID, recordPath string, claim bool) (string, error) {
+	pathError := func(message string, err error) error {
+		return &PlanError{
+			ErrorCode: ErrorCodePathOutsidePlan,
+			Message:   message,
+			PlanID:    planID,
+			Path:      recordPath,
+			Err:       err,
+		}
+	}
+	if strings.TrimSpace(recordPath) == "" {
+		return "", pathError("manifest record path is required", nil)
+	}
+	if filepath.IsAbs(recordPath) {
+		return "", pathError("manifest version 2 path must be relative", nil)
+	}
+	cleaned := filepath.Clean(filepath.FromSlash(recordPath))
+	if cleaned == "." || cleaned != filepath.FromSlash(recordPath) {
+		return "", pathError("manifest record path is not clean", nil)
+	}
+	parts := strings.Split(filepath.ToSlash(cleaned), "/")
+	if len(parts) != 2 || parts[0] == ".." || parts[1] == "" {
+		return "", pathError("manifest record path is not allowed", nil)
+	}
+	switch {
+	case claim && (parts[0] != tasksDirName || !strings.HasSuffix(parts[1], ".claim")):
+		return "", pathError("manifest claim path is not allowed", nil)
+	case !claim && parts[0] == tasksDirName && !strings.HasSuffix(parts[1], ".md"):
+		return "", pathError("manifest task path is not allowed", nil)
+	case !claim && parts[0] == historyDirName && !strings.HasSuffix(parts[1], ".done"):
+		return "", pathError("manifest history path is not allowed", nil)
+	case !claim && parts[0] != tasksDirName && parts[0] != historyDirName:
+		return "", pathError("manifest record path is not allowed", nil)
+	}
+	planDir, err := canonicalizePath(s.planDir(planID))
+	if err != nil {
+		return "", pathError("canonical plan directory is unreadable", err)
+	}
+	absolute := filepath.Join(planDir, cleaned)
+	resolved, err := canonicalizePath(absolute)
+	if err != nil {
+		return "", pathError("manifest record path cannot be resolved", err)
+	}
+	if !pathWithin(planDir, resolved) {
+		return "", pathError("manifest record path resolves outside plan", nil)
+	}
+	return absolute, nil
+}
+
+func (s *Store) legacyManifestRelativePath(planID, recordPath string, claim bool) (string, error) {
+	if !filepath.IsAbs(recordPath) {
+		if _, err := s.resolveManifestRecordPath(planID, recordPath, claim); err != nil {
+			return "", err
+		}
+		return filepath.ToSlash(filepath.Clean(recordPath)), nil
+	}
+	planDir, err := canonicalizePath(s.planDir(planID))
+	if err != nil {
+		return "", err
+	}
+	resolved, err := canonicalizePath(recordPath)
+	if err != nil {
+		return "", err
+	}
+	if !pathWithin(planDir, resolved) {
+		return "", &PlanError{
+			ErrorCode: ErrorCodePathOutsidePlan,
+			Message:   "legacy manifest path resolves outside plan",
+			PlanID:    planID,
+			Path:      recordPath,
+		}
+	}
+	relative, err := filepath.Rel(planDir, resolved)
+	if err != nil {
+		return "", err
+	}
+	relative = filepath.ToSlash(relative)
+	if _, err := s.resolveManifestRecordPath(planID, relative, claim); err != nil {
+		return "", err
+	}
+	return relative, nil
+}
+
+func (s *Store) cleanupSupersededRecord(planID, previousPath, activePath string) {
+	claim := strings.HasSuffix(previousPath, ".claim")
+	previous, err := s.resolveManifestRecordPath(planID, previousPath, claim)
+	if err != nil {
+		s.addWarning(fmt.Sprintf("cleanup retained %q: %v", previousPath, err))
+		return
+	}
+	if activePath != "" {
+		active, err := s.resolveManifestRecordPath(planID, activePath, strings.HasSuffix(activePath, ".claim"))
+		if err != nil {
+			s.addWarning(fmt.Sprintf("cleanup retained %q: active destination is unsafe: %v", previousPath, err))
+			return
+		}
+		same, known := sameFileIdentity(previous, active)
+		if !known {
+			s.addWarning(fmt.Sprintf("cleanup retained %q: filesystem identity is unknown", previousPath))
+			return
+		}
+		if same {
+			return
+		}
+	}
+	if err := removeFileFunc(previous); err != nil && !errors.Is(err, os.ErrNotExist) {
+		s.addWarning(fmt.Sprintf("cleanup left orphan %q: %v", previousPath, err))
+	}
+}
+
+func sameFileIdentity(first, second string) (same bool, known bool) {
+	firstInfo, firstErr := statFunc(first)
+	secondInfo, secondErr := statFunc(second)
+	if errors.Is(firstErr, os.ErrNotExist) {
+		return false, true
+	}
+	if firstErr != nil || secondErr != nil {
+		return false, false
+	}
+	return os.SameFile(firstInfo, secondInfo), true
 }

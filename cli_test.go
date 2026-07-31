@@ -150,7 +150,7 @@ func TestCLIPlanCommandsAndFlagReordering(t *testing.T) {
 	if code := runCLI(context.Background(), "agent-plan", []string{"delete", "--dir", root, created.ID, "--yes", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("delete code = %d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `"deleted": true`) {
+	if !strings.Contains(stdout.String(), `"deleted":true`) {
 		t.Fatalf("delete stdout = %q", stdout.String())
 	}
 	_ = impl
@@ -609,7 +609,7 @@ func TestCLIConfirmDeleteAndErrorPaths(t *testing.T) {
 	if code := runCLI(context.Background(), "agent-plan", []string{"delete", "--dir", root, planID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("delete noninteractive code = %d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `"deleted": true`) {
+	if !strings.Contains(stdout.String(), `"deleted":true`) {
 		t.Fatalf("delete noninteractive stdout = %q", stdout.String())
 	}
 
@@ -729,6 +729,76 @@ func TestCLISupportsShowAndEnvDirFallback(t *testing.T) {
 	}
 }
 
+func TestCLIShowMermaidTaskGraph(t *testing.T) {
+	root := t.TempDir()
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"init", "--dir", root}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("init code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCLI(context.Background(), "agent-plan", []string{"create", "--dir", root, `Graph & "Plan"`, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("create code = %d stderr=%s", code, stderr.String())
+	}
+	var plan Plan
+	if err := json.Unmarshal(stdout.Bytes(), &plan); err != nil {
+		t.Fatalf("Unmarshal(create) error = %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCLI(context.Background(), "agent-plan", []string{"add-task", "--dir", root, plan.ID, `Design "API"`, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("add design code = %d stderr=%s", code, stderr.String())
+	}
+	var design TaskRecord
+	if err := json.Unmarshal(stdout.Bytes(), &design); err != nil {
+		t.Fatalf("Unmarshal(design) error = %v", err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCLI(context.Background(), "agent-plan", []string{"add-task", "--dir", root, plan.ID, "Implement", "--parent", design.ID, "--depends-on", design.ID, "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("add implement code = %d stderr=%s", code, stderr.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+
+	if code := runCLI(context.Background(), "agent-plan", []string{"show", "--dir", root, plan.ID, "--mermaid"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("show mermaid code = %d stderr=%s", code, stderr.String())
+	}
+	got := stdout.String()
+	for _, want := range []string{
+		"%% Plan: Graph &amp; &quot;Plan&quot; (" + plan.ID + ")",
+		"flowchart TD",
+		`task0["` + design.ID + `<br/>Design &quot;API&quot;<br/>not_started"]:::not_started`,
+		"task0 -. parent .-> task1",
+		"task0 -->|blocks| task1",
+		"classDef complete",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("show --mermaid output missing %q:\n%s", want, got)
+		}
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := runCLI(context.Background(), "agent-plan", []string{"get", "--dir", root, plan.ID, "--mermaid"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
+		t.Fatalf("get mermaid code = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "flowchart TD") {
+		t.Fatalf("get --mermaid stdout = %q", stdout.String())
+	}
+}
+
+func TestCLIRejectsMultipleShowOutputFormats(t *testing.T) {
+	stdout := bytes.Buffer{}
+	stderr := bytes.Buffer{}
+	code := runCLI(context.Background(), "agent-plan", []string{"show", "plan", "--json", "--mermaid"}, strings.NewReader(""), &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "mutually exclusive") {
+		t.Fatalf("code = %d stderr = %q", code, stderr.String())
+	}
+}
+
 func TestMCPCommandUsesNewlineDelimitedMessages(t *testing.T) {
 	stdout := bytes.Buffer{}
 	stderr := bytes.Buffer{}
@@ -807,7 +877,7 @@ func TestCLIVersion(t *testing.T) {
 	if code := runCLI(context.Background(), "agent-plan", []string{"--version", "--json"}, strings.NewReader(""), &stdout, &stderr); code != 0 {
 		t.Fatalf("--version --json code = %d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), `"version": "`+Version+`"`) {
+	if !strings.Contains(stdout.String(), `"version":"`+Version+`"`) {
 		t.Fatalf("--version --json stdout = %q", stdout.String())
 	}
 }

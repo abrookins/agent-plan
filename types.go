@@ -73,7 +73,6 @@ type TaskSummary struct {
 	DependsOn          []string   `json:"depends_on,omitempty"`
 	Assignee           string     `json:"assignee,omitempty"`
 	BlockedReason      string     `json:"blocked_reason,omitempty"`
-	Output             string     `json:"output,omitempty"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
 	ClaimedBy          string     `json:"claimed_by,omitempty"`
@@ -83,6 +82,7 @@ type TaskSummary struct {
 	Path               string     `json:"path"`
 	ClaimPath          string     `json:"claim_path,omitempty"`
 	DescriptionPreview string     `json:"description_preview,omitempty"`
+	RecordHash         string     `json:"record_hash,omitempty"`
 }
 
 type Manifest struct {
@@ -179,6 +179,9 @@ type BulkImportChange struct {
 type PlanStats struct {
 	PlanID          string         `json:"plan_id"`
 	Name            string         `json:"name"`
+	Version         int            `json:"version"`
+	Health          string         `json:"health"`
+	FindingCount    int            `json:"finding_count"`
 	Total           int            `json:"total"`
 	StatusCounts    map[Status]int `json:"status_counts"`
 	RootCount       int            `json:"root_count"`
