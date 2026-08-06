@@ -856,10 +856,11 @@ func (s *Store) loadManifest(planID string) (Manifest, error) {
 				Path:      manifestFileName,
 			}
 		}
+		expectedTaskPath := taskRecordRelativePath(summary.ID, summary.Status)
 		if summary.Path == "" {
-			summary.Path = taskRecordRelativePath(summary.ID, summary.Status)
+			summary.Path = expectedTaskPath
 		} else if manifest.Version == 1 {
-			relative, err := s.legacyManifestRelativePath(planID, summary.Path, false)
+			relative, err := s.legacyManifestRelativePath(planID, summary.Path, expectedTaskPath, false)
 			if err != nil {
 				return Manifest{}, err
 			}
@@ -867,7 +868,7 @@ func (s *Store) loadManifest(planID string) (Manifest, error) {
 		} else if _, err := s.resolveManifestRecordPath(planID, summary.Path, false); err != nil {
 			return Manifest{}, err
 		}
-		if summary.Path != taskRecordRelativePath(summary.ID, summary.Status) {
+		if summary.Path != expectedTaskPath {
 			return Manifest{}, &PlanError{
 				ErrorCode: ErrorCodeManifestInvalid,
 				Message:   "manifest task path does not match its id and status",
@@ -881,7 +882,7 @@ func (s *Store) loadManifest(planID string) (Manifest, error) {
 		} else if summary.ClaimPath == "" {
 			summary.ClaimPath = taskClaimRelativePath(summary.ID)
 		} else if manifest.Version == 1 {
-			relative, err := s.legacyManifestRelativePath(planID, summary.ClaimPath, true)
+			relative, err := s.legacyManifestRelativePath(planID, summary.ClaimPath, taskClaimRelativePath(summary.ID), true)
 			if err != nil {
 				return Manifest{}, err
 			}
@@ -1524,7 +1525,7 @@ func (s *Store) resolveManifestRecordPath(planID, recordPath string, claim bool)
 	return absolute, nil
 }
 
-func (s *Store) legacyManifestRelativePath(planID, recordPath string, claim bool) (string, error) {
+func (s *Store) legacyManifestRelativePath(planID, recordPath, expectedPath string, claim bool) (string, error) {
 	if !filepath.IsAbs(recordPath) {
 		if _, err := s.resolveManifestRecordPath(planID, recordPath, claim); err != nil {
 			return "", err
@@ -1540,6 +1541,14 @@ func (s *Store) legacyManifestRelativePath(planID, recordPath string, claim bool
 		return "", err
 	}
 	if !pathWithin(planDir, resolved) {
+		if legacyManifestPathMatchesExpectedRecord(planID, recordPath, expectedPath) {
+			relative := filepath.ToSlash(filepath.Clean(filepath.FromSlash(expectedPath)))
+			if _, err := s.resolveManifestRecordPath(planID, relative, claim); err != nil {
+				return "", err
+			}
+			s.addWarning("version 1 manifest contains relocated absolute paths; using matching records from the current plan")
+			return relative, nil
+		}
 		return "", &PlanError{
 			ErrorCode: ErrorCodePathOutsidePlan,
 			Message:   "legacy manifest path resolves outside plan",
@@ -1556,6 +1565,14 @@ func (s *Store) legacyManifestRelativePath(planID, recordPath string, claim bool
 		return "", err
 	}
 	return relative, nil
+}
+
+func legacyManifestPathMatchesExpectedRecord(planID, recordPath, expectedPath string) bool {
+	recordPath = filepath.Clean(recordPath)
+	expectedPath = filepath.Clean(filepath.FromSlash(expectedPath))
+	return filepath.Base(filepath.Dir(filepath.Dir(recordPath))) == planID &&
+		filepath.Base(recordPath) == filepath.Base(expectedPath) &&
+		filepath.Base(filepath.Dir(recordPath)) == filepath.Base(filepath.Dir(expectedPath))
 }
 
 func (s *Store) cleanupSupersededRecord(planID, previousPath, activePath string) {

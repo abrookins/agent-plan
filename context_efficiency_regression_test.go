@@ -1396,6 +1396,119 @@ func TestVersion1ManifestReadIsNonMutatingAndMutationUpgradesSafely(t *testing.T
 	}
 }
 
+func TestVersion1ManifestRelocatedReadUsesPlanLocalRecordsAndMutationUpgradesSafely(t *testing.T) {
+	base := t.TempDir()
+	sourceRoot := filepath.Join(base, "source")
+	sourceStore, err := Init(sourceRoot)
+	if err != nil {
+		t.Fatalf("Init(sourceRoot) error = %v", err)
+	}
+	plan, err := sourceStore.CreatePlan("Relocated version 1", "", "")
+	if err != nil {
+		t.Fatalf("CreatePlan() error = %v", err)
+	}
+	task, err := sourceStore.AddTask(plan.ID, "Legacy task", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddTask() error = %v", err)
+	}
+	manifest, err := sourceStore.loadManifest(plan.ID)
+	if err != nil {
+		t.Fatalf("loadManifest() error = %v", err)
+	}
+	manifest.Version = 1
+	for i := range manifest.Tasks {
+		manifest.Tasks[i].Path = sourceStore.taskFilePath(plan.ID, manifest.Tasks[i].ID, manifest.Tasks[i].Status)
+		manifest.Tasks[i].ClaimPath = sourceStore.claimPath(plan.ID, manifest.Tasks[i].ID)
+	}
+	if err := atomicWriteJSON(sourceStore.planManifestPath(plan.ID), manifest); err != nil {
+		t.Fatalf("write version 1 manifest error = %v", err)
+	}
+
+	destinationRoot := filepath.Join(base, "destination")
+	destinationStore, err := Init(destinationRoot)
+	if err != nil {
+		t.Fatalf("Init(destinationRoot) error = %v", err)
+	}
+	if err := os.Rename(sourceStore.planDir(plan.ID), destinationStore.planDir(plan.ID)); err != nil {
+		t.Fatalf("Rename(plan directory) error = %v", err)
+	}
+	before := fileChecksum(t, destinationStore.planManifestPath(plan.ID))
+
+	plans, err := destinationStore.ListPlans()
+	if err != nil {
+		t.Fatalf("ListPlans(relocated version 1) error = %v", err)
+	}
+	if len(plans) != 1 || plans[0].ID != plan.ID {
+		t.Fatalf("ListPlans(relocated version 1) = %#v", plans)
+	}
+	if _, err := destinationStore.GetPlan(plan.ID); err != nil {
+		t.Fatalf("GetPlan(relocated version 1) error = %v", err)
+	}
+	if afterRead := fileChecksum(t, destinationStore.planManifestPath(plan.ID)); afterRead != before {
+		t.Fatalf("read mutated relocated version 1 manifest: got %x want %x", afterRead, before)
+	}
+	warnings := strings.Join(destinationStore.Warnings(), "\n")
+	if !strings.Contains(warnings, "relocated absolute paths") {
+		t.Fatalf("relocation warnings = %#v", destinationStore.Warnings())
+	}
+
+	description := "mutated after relocation"
+	if _, err := destinationStore.UpdateTask(plan.ID, task.ID, TaskUpdateOptions{Description: &description}); err != nil {
+		t.Fatalf("UpdateTask(relocated version 1) error = %v", err)
+	}
+	upgraded, err := destinationStore.loadManifest(plan.ID)
+	if err != nil {
+		t.Fatalf("loadManifest(upgraded) error = %v", err)
+	}
+	if upgraded.Version != currentManifestVersion {
+		t.Fatalf("manifest version = %d, want %d", upgraded.Version, currentManifestVersion)
+	}
+	for _, summary := range upgraded.Tasks {
+		if filepath.IsAbs(summary.Path) || filepath.IsAbs(summary.ClaimPath) {
+			t.Fatalf("upgraded manifest retained absolute path: %#v", summary)
+		}
+	}
+}
+
+func TestVersion1ManifestRejectsRelocatedPathWithMismatchedRecordIdentity(t *testing.T) {
+	root := t.TempDir()
+	store, err := Init(root)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	plan, err := store.CreatePlan("Unsafe relocated path", "", "")
+	if err != nil {
+		t.Fatalf("CreatePlan() error = %v", err)
+	}
+	if _, err := store.AddTask(plan.ID, "Task", AddOptions{}); err != nil {
+		t.Fatalf("AddTask() error = %v", err)
+	}
+	manifest, err := store.loadManifest(plan.ID)
+	if err != nil {
+		t.Fatalf("loadManifest() error = %v", err)
+	}
+	manifest.Version = 1
+	manifest.Tasks[0].Path = filepath.Join(t.TempDir(), tasksDirName, "different.md")
+	if err := atomicWriteJSON(store.planManifestPath(plan.ID), manifest); err != nil {
+		t.Fatalf("write unsafe version 1 manifest error = %v", err)
+	}
+	if _, err := store.GetPlan(plan.ID); !errorHasCode(err, ErrorCodePathOutsidePlan) {
+		t.Fatalf("GetPlan() error = %v, want %s", err, ErrorCodePathOutsidePlan)
+	}
+	manifest.Tasks[0].Path = filepath.Join(
+		t.TempDir(),
+		"different-plan",
+		tasksDirName,
+		manifest.Tasks[0].ID+".md",
+	)
+	if err := atomicWriteJSON(store.planManifestPath(plan.ID), manifest); err != nil {
+		t.Fatalf("write wrong-plan version 1 manifest error = %v", err)
+	}
+	if _, err := store.GetPlan(plan.ID); !errorHasCode(err, ErrorCodePathOutsidePlan) {
+		t.Fatalf("GetPlan(wrong plan) error = %v, want %s", err, ErrorCodePathOutsidePlan)
+	}
+}
+
 func TestVersion2ManifestRejectsUnsafeRecordPaths(t *testing.T) {
 	for _, testCase := range []struct {
 		name string
