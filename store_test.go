@@ -403,6 +403,41 @@ func TestInstallGuidanceReplacesLegacyManagedBlock(t *testing.T) {
 	}
 }
 
+func TestTaskResultPersistsAndSurvivesCompletion(t *testing.T) {
+	root := t.TempDir()
+	store, err := Init(root)
+	if err != nil {
+		t.Fatalf("Init() error = %v", err)
+	}
+	plan, err := store.CreatePlan("Results", "", "")
+	if err != nil {
+		t.Fatalf("CreatePlan() error = %v", err)
+	}
+	task, err := store.AddTask(plan.ID, "Decide", AddOptions{})
+	if err != nil {
+		t.Fatalf("AddTask() error = %v", err)
+	}
+	result := "Decision: ship. Evidence: tests pass. Handoff: review PR."
+	status := StatusComplete
+	if _, err := store.UpdateTask(plan.ID, task.ID, TaskUpdateOptions{Result: &result, Status: &status}); err != nil {
+		t.Fatalf("UpdateTask() error = %v", err)
+	}
+	loaded, err := store.GetPlan(plan.ID)
+	if err != nil {
+		t.Fatalf("GetPlan() error = %v", err)
+	}
+	if got := loaded.GetTask(task.ID).Result; got != result {
+		t.Errorf("result = %q, want %q", got, result)
+	}
+	view, err := store.GetTasks(plan.ID, TaskQuery{TaskRefs: []string{task.ID}, Fields: []string{"result", "result_preview", "result_bytes"}})
+	if err != nil {
+		t.Fatalf("GetTasks() error = %v", err)
+	}
+	if got := view.Tasks[0]["result"]; got != result {
+		t.Errorf("retrieved result = %#v, want %q", got, result)
+	}
+}
+
 func TestMainNamedHelp(t *testing.T) {
 	var stdout strings.Builder
 	var stderr strings.Builder

@@ -50,6 +50,7 @@ type TaskRecord struct {
 	DependsOn     []string   `json:"depends_on,omitempty" yaml:"depends_on,omitempty"`
 	Assignee      string     `json:"assignee,omitempty" yaml:"assignee,omitempty"`
 	BlockedReason string     `json:"blocked_reason,omitempty" yaml:"blocked_reason,omitempty"`
+	Result        string     `json:"result,omitempty" yaml:"result,omitempty"`
 	Output        string     `json:"output,omitempty" yaml:"output,omitempty"`
 	CreatedAt     time.Time  `json:"created_at" yaml:"created_at"`
 	UpdatedAt     time.Time  `json:"updated_at" yaml:"updated_at"`
@@ -122,6 +123,7 @@ type TaskUpdateOptions struct {
 	Status            *Status
 	Name              *string
 	Description       *string
+	Result            *string
 	ParentID          *string
 	ClaimedBy         *string
 	ClearClaimedBy    bool

@@ -635,6 +635,7 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 	description := fs.String("description", "", "new task description")
 	parent := fs.String("parent", "", "new parent task name or id; pass empty to move to the root")
 	claimedBy := fs.String("claimed-by", "", "record the task as claimed by a specific agent id")
+	result := fs.String("result", "", "task decision, evidence, and handoff")
 	clearClaimedBy := fs.Bool("clear-claimed-by", false, "remove any claimed-by value from the task")
 	order := fs.Int("order", -1, "sibling order")
 	clearDependencies := fs.Bool("clear-dependencies", false, "remove dependency links from the task")
@@ -648,6 +649,7 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 		"--description":        true,
 		"--parent":             true,
 		"--claimed-by":         true,
+		"--result":             true,
 		"--clear-claimed-by":   false,
 		"--depends-on":         true,
 		"--order":              true,
@@ -660,7 +662,7 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 		return 1
 	}
 	if fs.NArg() != 2 {
-		fmt.Fprintf(stderr, "usage: %s update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--parent TASK] [--claimed-by ID] [--clear-claimed-by] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>\n", program)
+		fmt.Fprintf(stderr, "usage: %s update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--result TEXT] [--parent TASK] [--claimed-by ID] [--clear-claimed-by] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>\n", program)
 		return 1
 	}
 	store, err := Open(*dir)
@@ -687,7 +689,7 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 		}
 		statusPtr = &value
 	}
-	var namePtr, descPtr, claimedByPtr *string
+	var namePtr, descPtr, resultPtr, claimedByPtr *string
 	if isFlagPassed(args, "--name") {
 		value := *name
 		namePtr = &value
@@ -695,6 +697,10 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 	if isFlagPassed(args, "--description") {
 		value := *description
 		descPtr = &value
+	}
+	if isFlagPassed(args, "--result") {
+		value := *result
+		resultPtr = &value
 	}
 	var parentPtr *string
 	if isFlagPassed(args, "--parent") {
@@ -730,6 +736,7 @@ func runUpdateTask(program string, stdout, stderr io.Writer, args []string) int 
 		Status:            statusPtr,
 		Name:              namePtr,
 		Description:       descPtr,
+		Result:            resultPtr,
 		ParentID:          parentPtr,
 		ClaimedBy:         claimedByPtr,
 		ClearClaimedBy:    *clearClaimedBy,

@@ -29,6 +29,8 @@ var defaultTaskQueryFields = []string{
 	"updated_at",
 	"description_preview",
 	"description_bytes",
+	"result_preview",
+	"result_bytes",
 	"output_preview",
 	"output_bytes",
 }
@@ -48,9 +50,12 @@ var allowedTaskQueryFields = map[string]struct{}{
 	"updated_at":          {},
 	"description_preview": {},
 	"description_bytes":   {},
+	"result_preview":      {},
+	"result_bytes":        {},
 	"output_preview":      {},
 	"output_bytes":        {},
 	"description":         {},
+	"result":              {},
 	"output":              {},
 	"path":                {},
 	"claim_path":          {},
@@ -348,7 +353,7 @@ func (s *Store) taskView(planID string, summary TaskSummary, fields []string) (m
 	needsRecord := false
 	for _, field := range fields {
 		switch field {
-		case "description", "description_preview", "description_bytes", "output", "output_preview", "output_bytes":
+		case "description", "description_preview", "description_bytes", "result", "result_preview", "result_bytes", "output", "output_preview", "output_bytes":
 			needsRecord = true
 		}
 	}
@@ -407,12 +412,18 @@ func (s *Store) taskView(planID string, summary TaskSummary, fields []string) (m
 			view[field] = unicodePreview(record.Description, taskPreviewRunes)
 		case "description_bytes":
 			view[field] = len([]byte(record.Description))
+		case "result_preview":
+			view[field] = unicodePreview(taskResult(record), taskPreviewRunes)
+		case "result_bytes":
+			view[field] = len([]byte(taskResult(record)))
 		case "output_preview":
 			view[field] = unicodePreview(record.Output, taskPreviewRunes)
 		case "output_bytes":
 			view[field] = len([]byte(record.Output))
 		case "description":
 			view[field] = record.Description
+		case "result":
+			view[field] = taskResult(record)
 		case "output":
 			view[field] = record.Output
 		case "path":
@@ -430,6 +441,13 @@ func (s *Store) taskView(planID string, summary TaskSummary, fields []string) (m
 		}
 	}
 	return view, nil
+}
+
+func taskResult(task TaskRecord) string {
+	if task.Result != "" {
+		return task.Result
+	}
+	return task.Output
 }
 
 func taskQuerySignature(query TaskQuery) string {

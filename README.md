@@ -106,6 +106,7 @@ agent-plan delete <plan-id> --yes
 agent-plan add-task <plan-id> "Freeze parity matrix" --description "Capture the target surface"
 agent-plan update-task <plan-id> <task-id> --status in_progress
 agent-plan update-task <plan-id> <task-id> --status complete
+agent-plan update-task <plan-id> <task-id> --result "Decision: ship. Evidence: tests pass. Handoff: review PR."
 agent-plan delete-task <plan-id> <task-id>
 agent-plan import <plan-id> --file plan-tasks.json --dry-run --json
 agent-plan import <plan-id> --file plan-tasks.json --json
@@ -184,6 +185,9 @@ The CLI accepts these task statuses:
 
 Mark finished work with `update-task --status complete`. Completed task records
 move from `tasks/*.md` to `history/*.done`.
+
+Use `update-task --result` to record a task's decision, evidence, and handoff.
+The result remains available after completion, without a session transcript.
 
 ## Guidance Install
 

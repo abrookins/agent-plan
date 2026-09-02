@@ -319,6 +319,9 @@ func (p *Plan) ApplyTaskUpdate(taskID string, opts TaskUpdateOptions) (*TaskReco
 	if opts.Description != nil {
 		task.Description = *opts.Description
 	}
+	if opts.Result != nil {
+		task.Result = *opts.Result
+	}
 	if opts.ParentID != nil {
 		parentID := strings.TrimSpace(*opts.ParentID)
 		if parentID == task.ID {

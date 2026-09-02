@@ -188,6 +188,7 @@ func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 				"status":             map[string]any{"type": "string"},
 				"name":               map[string]any{"type": "string"},
 				"description":        map[string]any{"type": "string"},
+				"result":             map[string]any{"type": "string", "description": "Task decision, evidence, and handoff."},
 				"parent":             taskSchema,
 				"claimed_by":         map[string]any{"type": "string"},
 				"clear_claimed_by":   map[string]any{"type": "boolean"},
@@ -778,6 +779,10 @@ func taskUpdateOptionsFromArgs(plan *Plan, taskID string, args map[string]any) (
 	if _, ok := args["description"]; ok {
 		value := optionalString(args, "description")
 		opts.Description = &value
+	}
+	if _, ok := args["result"]; ok {
+		value := optionalString(args, "result")
+		opts.Result = &value
 	}
 	if _, ok := args["parent"]; ok {
 		value := ""
