@@ -100,7 +100,7 @@ func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 			InputSchema: schema(rootSchema, map[string]any{
 				"plan":          planSchema,
 				"tasks":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"status":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"status":        map[string]any{"type": "array", "items": statusSchema()},
 				"parent":        taskSchema,
 				"claimed_by":    map[string]any{"type": "string"},
 				"fields":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
@@ -185,7 +185,7 @@ func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 			InputSchema: schema(rootSchema, map[string]any{
 				"plan":               planSchema,
 				"task":               taskSchema,
-				"status":             map[string]any{"type": "string"},
+				"status":             statusSchema(),
 				"name":               map[string]any{"type": "string"},
 				"description":        map[string]any{"type": "string"},
 				"result":             map[string]any{"type": "string", "description": "Task decision, evidence, and handoff."},
@@ -239,6 +239,9 @@ func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 
 func (s *MCPServer) CallTool(ctx context.Context, name string, args map[string]any) mcpproto.ToolResult {
 	started := time.Now()
+	if err := s.validateArguments(ctx, name, args); err != nil {
+		return toolErr(err)
+	}
 	root := s.resolveRoot(args)
 	store, err := OpenOrInit(root)
 	var result mcpproto.ToolResult
@@ -572,8 +575,9 @@ func schema(root map[string]any, extra map[string]any, required ...string) map[s
 		properties[key] = value
 	}
 	result := map[string]any{
-		"type":       "object",
-		"properties": properties,
+		"type":                 "object",
+		"properties":           properties,
+		"additionalProperties": false,
 	}
 	if len(required) > 0 {
 		result["required"] = required

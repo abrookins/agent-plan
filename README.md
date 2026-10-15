@@ -242,3 +242,11 @@ Example MCP config:
 
 The repo includes a local skill at `.agents/skills/agent-plan/SKILL.md` for
 agents that need a compact `agent-plan` workflow.
+
+### MCP argument validation
+
+MCP tools reject missing required fields, unknown parameters, incorrect types,
+and invalid task statuses before opening or creating a workspace. Discovery
+publishes status choices for updates and filters: `not_started`, `in_progress`,
+`blocked`, `complete`, and `cancelled`. Use `tools/list` to inspect the schema;
+argument errors identify fields without echoing their values.
