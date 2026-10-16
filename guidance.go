@@ -141,6 +141,8 @@ func buildCodexGuidance() string {
 
 When the prompt or current work references a shared plan, task list, or explicit plan id, coordinate through ` + "`agent-plan`" + `.
 
+- Prefer direct ` + "`plan_*`" + ` MCP tools when the host exposes them. If the proxy instead exposes ` + "`agent_plan_search_tools`" + `, ` + "`agent_plan_describe_tool`" + `, and ` + "`agent_plan_call_tool`" + `, use those wrappers; ` + "`agent_plan_call_tool`" + ` executes mutations as well as reads.
+- When work needs a new plan and no plan id exists, create one with ` + "`plan_create`" + ` or ` + "`agent-plan create \"Plan name\" --description \"Why it exists\" --json`" + `.
 - Start with ` + "`agent-plan show <plan_id> --json`" + ` or ` + "`agent-plan get <plan_id> --json`" + `
 - Use ` + "`--dir <workspace-root>`" + ` when operating outside the target workspace; otherwise ` + "`AGENT_PLAN_DIR`" + ` and then the current directory are used
 - Mark tasks ` + "`in_progress`" + ` when you start: ` + "`agent-plan update-task <plan_id> <task_id> --status in_progress --json`" + `
@@ -166,7 +168,7 @@ func buildPlanManagementSkill() string {
 	return strings.TrimSpace(`
 ---
 name: agent-plan-management
-description: Use when a prompt references a shared plan, task list, or explicit plan_id and the agent should coordinate work through the agent-plan CLI.
+description: Use when a prompt references a shared plan, task list, or explicit plan_id and the agent should coordinate work through agent-plan MCP tools or the CLI.
 ---
 
 # agent-plan-management
@@ -175,6 +177,10 @@ Use this skill when a prompt references a shared plan, task list, or explicit ` 
 
 ## Required behavior
 
+- Prefer direct ` + "`plan_*`" + ` MCP tools when they are available.
+- A proxy may expose only ` + "`agent_plan_search_tools`" + `, ` + "`agent_plan_describe_tool`" + `, and ` + "`agent_plan_call_tool`" + ` directly. These are discovery wrappers, not a read-only plan API: search for the operation, describe it when its schema is needed, then invoke it through ` + "`agent_plan_call_tool`" + `. Mutating operations such as ` + "`plan_create`" + ` and ` + "`plan_update_task`" + ` are supported through the same call wrapper.
+- Fall back to the ` + "`agent-plan`" + ` CLI when MCP plan tools are unavailable.
+- When the requested work needs a new plan and no ` + "`plan_id`" + ` exists, create one with ` + "`plan_create`" + ` or ` + "`agent-plan create \"Plan name\" --description \"Why it exists\" --json`" + `.
 - Start with ` + "`agent-plan show <plan_id> --json`" + ` or ` + "`agent-plan get <plan_id> --json`" + ` to load the whole plan and task state.
 - Add ` + "`--dir <workspace-root>`" + ` when you are outside the target workspace. Without it, the CLI uses ` + "`AGENT_PLAN_DIR`" + ` and then the current directory.
 - Claim ready work before editing when coordination matters: ` + "`agent-plan claim-next <plan_id> --by <agent-id> --json`" + `.
@@ -218,6 +224,9 @@ agent-plan create "Plan name" --description "Why this exists" --json
 agent-plan list --json
 agent-plan get <plan_id> --json
 agent-plan show <plan_id> --json
+agent-plan get-task <plan_id> <task_id> --json
+agent-plan stats <plan_id> --json
+agent-plan audit <plan_id> --json
 agent-plan update <plan_id> --name "New name" --json
 agent-plan delete <plan_id> --yes --json
 ` + "```" + `
@@ -228,7 +237,7 @@ Task lifecycle:
 agent-plan add-task <plan_id> "Task name" --description "Why it is needed" --json
 agent-plan update-task <plan_id> <task_id> --status in_progress --json
 agent-plan update-task <plan_id> <task_id> --status blocked --json
-agent-plan update-task <plan_id> <task_id> --status complete --json
+agent-plan update-task <plan_id> <task_id> --status complete --result "Evidence and handoff" --json
 agent-plan update-task <plan_id> <task_id> --parent <parent_task_id> --json
 agent-plan update-task <plan_id> <task_id> --depends-on <other_task_id> --json
 agent-plan delete-task <plan_id> <task_id> --json
@@ -240,10 +249,13 @@ Coordination:
 agent-plan ready <plan_id> --json
 agent-plan next <plan_id> --by <agent-id> --json
 agent-plan claim-next <plan_id> --by <agent-id> --json
+agent-plan chain <plan_id> <first_task_id> <second_task_id> [task_id...] --json
 ` + "```" + `
 
 Other current commands:
 
+- ` + "`agent-plan import <plan_id> --file <path> --dry-run --json`" + ` validates a task graph before import; omit ` + "`--dry-run`" + ` to apply it.
+- ` + "`agent-plan lock status <plan_id>`" + ` inspects a lock; ` + "`agent-plan lock clear --if-dead <plan_id>`" + ` removes only a locally proven-dead lock.
 - ` + "`agent-plan install [--global] AGENTS.md|CLAUDE.md|skill`" + ` installs managed guidance.
 - ` + "`agent-plan mcp`" + ` runs the stdio MCP server; it does not use ` + "`--json`" + `.
 - ` + "`agent-plan version --json`" + ` prints the CLI version.
@@ -268,8 +280,15 @@ Available plan tools:
 - ` + "`plan_list`" + `
 - ` + "`plan_get`" + `
 - ` + "`plan_show`" + `
+- ` + "`plan_get_tasks`" + `
 - ` + "`plan_update`" + `
 - ` + "`plan_delete`" + `
+- ` + "`plan_import`" + `
+- ` + "`plan_stats`" + `
+- ` + "`plan_audit`" + `
+- ` + "`plan_lock_status`" + `
+- ` + "`plan_lock_clear`" + `
+- ` + "`plan_chain`" + `
 - ` + "`plan_add_task`" + `
 - ` + "`plan_update_task`" + `
 - ` + "`plan_delete_task`" + `

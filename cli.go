@@ -1364,9 +1364,10 @@ var commandHelpEntries = map[string]helpEntry{
 	},
 	"update-task": {
 		Summary: "Update task status or metadata.",
-		Usage:   "update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--parent TASK] [--claimed-by ID] [--clear-claimed-by] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>",
+		Usage:   "update-task [--dir PATH] [--status STATUS] [--name TEXT] [--description TEXT] [--result TEXT] [--parent TASK] [--claimed-by ID] [--clear-claimed-by] [--depends-on TASK] [--order N] [--clear-dependencies] [--json] <plan> <task>",
 		Details: []string{
 			"Valid statuses: not_started, in_progress, blocked, complete, cancelled.",
+			"Use --result to preserve the task decision, evidence, and handoff after completion.",
 			"Parent references accept task IDs or exact task names; pass an empty --parent value to move a task to the root.",
 			"Setting --status complete archives the durable record into history/*.done.",
 		},

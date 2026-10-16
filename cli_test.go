@@ -677,6 +677,24 @@ func TestInstallWritesWorkspaceFiles(t *testing.T) {
 	}
 }
 
+func TestPlanManagementSkillDocumentsEveryMCPTool(t *testing.T) {
+	skill := buildPlanManagementSkill()
+	for _, tool := range NewMCPServer(t.TempDir()).Tools(context.Background()) {
+		if !strings.Contains(skill, "`"+tool.Name+"`") {
+			t.Errorf("skill does not document MCP tool %q", tool.Name)
+		}
+	}
+	for _, wrapper := range []string{
+		"agent_plan_search_tools",
+		"agent_plan_describe_tool",
+		"agent_plan_call_tool",
+	} {
+		if !strings.Contains(skill, "`"+wrapper+"`") {
+			t.Errorf("skill does not document proxy wrapper %q", wrapper)
+		}
+	}
+}
+
 func TestInstallSupportsDirFlag(t *testing.T) {
 	root := t.TempDir()
 	stdout := bytes.Buffer{}
@@ -858,6 +876,9 @@ func TestCLIHelpTextIsMeaningful(t *testing.T) {
 	}
 	if !strings.Contains(stdout.String(), "not_started, in_progress, blocked, complete, cancelled") {
 		t.Fatalf("update-task help stdout = %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "--result") {
+		t.Fatalf("update-task help omits --result: %q", stdout.String())
 	}
 }
 

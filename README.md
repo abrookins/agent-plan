@@ -204,6 +204,7 @@ The stdio server exposes the full plan workflow:
 - `plan_list`
 - `plan_get`
 - `plan_show`
+- `plan_get_tasks`
 - `plan_update`
 - `plan_delete`
 - `plan_add_task`
