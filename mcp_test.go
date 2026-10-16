@@ -33,6 +33,24 @@ func TestMCPPlanLifecycle(t *testing.T) {
 		t.Fatalf("Unmarshal(plan_create) error = %v", err)
 	}
 
+	result = server.CallTool(context.Background(), "plan_list", map[string]any{})
+	if result.IsError {
+		t.Fatalf("plan_list result = %#v", result)
+	}
+	raw, err = json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatalf("Marshal(plan_list) error = %v", err)
+	}
+	var listed struct {
+		Plans []PlanSummary `json:"plans"`
+	}
+	if err := json.Unmarshal(raw, &listed); err != nil {
+		t.Fatalf("Unmarshal(plan_list) error = %v", err)
+	}
+	if len(listed.Plans) != 1 || listed.Plans[0].ID != plan.ID {
+		t.Fatalf("plan_list = %#v", listed)
+	}
+
 	result = server.CallTool(context.Background(), "plan_add_task", map[string]any{
 		"plan": plan.ID,
 		"name": "Spec",
@@ -66,11 +84,13 @@ func TestMCPPlanLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal(plan_ready) error = %v", err)
 	}
-	var ready []map[string]any
+	var ready struct {
+		Tasks []map[string]any `json:"tasks"`
+	}
 	if err := json.Unmarshal(raw, &ready); err != nil {
 		t.Fatalf("Unmarshal(plan_ready) error = %v", err)
 	}
-	if len(ready) != 1 || ready[0]["id"] != spec.ID {
+	if len(ready.Tasks) != 1 || ready.Tasks[0]["id"] != spec.ID {
 		t.Fatalf("ready = %#v", ready)
 	}
 
@@ -176,6 +196,19 @@ func TestMCPPlanLifecycle(t *testing.T) {
 	})
 	if result.IsError {
 		t.Fatalf("plan_chain result = %#v", result)
+	}
+	raw, err = json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatalf("Marshal(plan_chain) error = %v", err)
+	}
+	var chained struct {
+		Tasks []TaskRecord `json:"tasks"`
+	}
+	if err := json.Unmarshal(raw, &chained); err != nil {
+		t.Fatalf("Unmarshal(plan_chain) error = %v", err)
+	}
+	if len(chained.Tasks) != 3 {
+		t.Fatalf("plan_chain = %#v", chained)
 	}
 
 	result = server.CallTool(context.Background(), "plan_audit", map[string]any{"plan": plan.ID})

@@ -58,6 +58,23 @@ func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 	}
 	planSchema := map[string]any{"type": "string"}
 	taskSchema := map[string]any{"type": "string"}
+	taskQuerySchema := schema(rootSchema, map[string]any{
+		"plan":          planSchema,
+		"tasks":         map[string]any{"type": "array", "minItems": 1, "items": map[string]any{"type": "string"}},
+		"status":        map[string]any{"type": "array", "minItems": 1, "items": statusSchema()},
+		"parent":        map[string]any{"type": "string", "minLength": 1},
+		"claimed_by":    map[string]any{"type": "string", "minLength": 1},
+		"fields":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": maxTaskQueryLimit},
+		"cursor":        map[string]any{"type": "string"},
+		"known_version": map[string]any{"type": "integer", "minimum": 0},
+	}, "plan")
+	taskQuerySchema["anyOf"] = []any{
+		map[string]any{"required": []string{"tasks"}},
+		map[string]any{"required": []string{"status"}},
+		map[string]any{"required": []string{"parent"}},
+		map[string]any{"required": []string{"claimed_by"}},
+	}
 	return []mcpproto.Tool{
 		{
 			Name:        "plan_init",
@@ -96,18 +113,8 @@ func (s *MCPServer) Tools(_ context.Context) []mcpproto.Tool {
 		},
 		{
 			Name:        "plan_get_tasks",
-			Description: "Retrieve selected tasks with bounded fields and version-bound pagination.",
-			InputSchema: schema(rootSchema, map[string]any{
-				"plan":          planSchema,
-				"tasks":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"status":        map[string]any{"type": "array", "items": statusSchema()},
-				"parent":        taskSchema,
-				"claimed_by":    map[string]any{"type": "string"},
-				"fields":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
-				"limit":         map[string]any{"type": "integer", "minimum": 1, "maximum": maxTaskQueryLimit},
-				"cursor":        map[string]any{"type": "string"},
-				"known_version": map[string]any{"type": "integer", "minimum": 0},
-			}, "plan"),
+			Description: "Retrieve selected tasks with bounded fields and version-bound pagination. Requires at least one of tasks, status, parent, or claimed_by.",
+			InputSchema: taskQuerySchema,
 		},
 		{
 			Name:        "plan_update",
@@ -273,7 +280,7 @@ func (s *MCPServer) callTool(_ context.Context, store *Store, name string, args 
 		if err != nil {
 			return toolErr(err)
 		}
-		return toolOK(fmt.Sprintf("listed %d plans", len(plans)), plans)
+		return toolOK(fmt.Sprintf("listed %d plans", len(plans)), map[string]any{"plans": plans})
 	case "plan_get":
 		planID, unchanged, err := resolveReadVersion(store, args)
 		if err != nil {
@@ -424,7 +431,7 @@ func (s *MCPServer) callTool(_ context.Context, store *Store, name string, args 
 		if err != nil {
 			return toolErr(err)
 		}
-		return toolOK("tasks chained", updated)
+		return toolOK("tasks chained", map[string]any{"tasks": updated})
 	case "plan_add_task":
 		plan, err := resolvePlanFromArgs(store, args)
 		if err != nil {
@@ -498,7 +505,10 @@ func (s *MCPServer) callTool(_ context.Context, store *Store, name string, args 
 		}
 		ready := plan.ReadyTasks()
 		payload := boundedReadyPayload(plan, ready)
-		result := toolOK(fmt.Sprintf("listed %d of %d ready tasks", len(payload), len(ready)), payload)
+		result := toolOK(
+			fmt.Sprintf("listed %d of %d ready tasks", len(payload), len(ready)),
+			map[string]any{"tasks": payload},
+		)
 		result.MetricHints = map[string]int{
 			"returned": len(payload),
 			"omitted":  len(ready) - len(payload),
@@ -864,6 +874,16 @@ func (s *MCPServer) recordOutputMetric(name string, args map[string]any, result 
 	case []map[string]any:
 		metric.Returned = len(typed)
 	case map[string]any:
+		switch plans := typed["plans"].(type) {
+		case []PlanSummary:
+			metric.Returned = len(plans)
+		}
+		switch tasks := typed["tasks"].(type) {
+		case []TaskRecord:
+			metric.Returned = len(tasks)
+		case []map[string]any:
+			metric.Returned = len(tasks)
+		}
 		if unchanged, ok := typed["unchanged"].(bool); ok {
 			metric.Unchanged = unchanged
 		}

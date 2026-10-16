@@ -17,6 +17,11 @@ func TestMCPArgumentValidationBeforeStorage(t *testing.T) {
 	}{
 		{"plan_update_task", map[string]any{"plan": "missing", "task": "missing", "status": "private-invalid-value"}},
 		{"plan_get_tasks", map[string]any{"plan": "missing", "status": []any{"private-invalid-value"}}},
+		{"plan_get_tasks", map[string]any{"plan": "missing"}},
+		{"plan_get_tasks", map[string]any{"plan": "missing", "tasks": []any{}}},
+		{"plan_get_tasks", map[string]any{"plan": "missing", "status": []any{}}},
+		{"plan_get_tasks", map[string]any{"plan": "missing", "parent": ""}},
+		{"plan_get_tasks", map[string]any{"plan": "missing", "claimed_by": ""}},
 		{"plan_get", map[string]any{}},
 		{"plan_get", map[string]any{"plan": 123}},
 		{"plan_get", map[string]any{"plan": "missing", "typo": "private-invalid-value"}},
@@ -35,6 +40,16 @@ func TestMCPArgumentValidationBeforeStorage(t *testing.T) {
 	}
 	for _, status := range []Status{StatusNotStarted, StatusInProgress, StatusBlocked, StatusComplete, StatusCancelled} {
 		if err := server.validateArguments(context.Background(), "plan_update_task", map[string]any{"plan": "p", "task": "t", "status": string(status)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range []map[string]any{
+		{"plan": "p", "tasks": []any{"t"}},
+		{"plan": "p", "status": []any{string(StatusNotStarted)}},
+		{"plan": "p", "parent": "t"},
+		{"plan": "p", "claimed_by": "agent"},
+	} {
+		if err := server.validateArguments(context.Background(), "plan_get_tasks", args); err != nil {
 			t.Fatal(err)
 		}
 	}
